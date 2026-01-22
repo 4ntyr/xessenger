@@ -7,7 +7,7 @@ import socket
 import threading
 import sys
 import tkinter as tk
-from tkinter import scrolledtext, messagebox, simpledialog
+from tkinter import scrolledtext, messagebox, simpledialog, Toplevel, Label, Entry, Button, Frame, Canvas, Scrollbar, VERTICAL, HORIZONTAL
 from cryptography.hazmat.primitives.asymmetric import dh
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
@@ -19,6 +19,13 @@ import time
 from winotify import Notification, audio
 from datetime import datetime
 from zoneinfo import ZoneInfo
+import requests
+from PIL import Image, ImageTk
+from io import BytesIO
+
+# Tenor API configuration
+TENOR_API_KEY = "AIzaSyAyimkuYQYF_FXVALexPuGQctUWRURdCYQ"  # Default key, users should get their own
+TENOR_API_URL = "https://tenor.googleapis.com/v2/search"
 
 class CommunicationClient:
     def __init__(self, host='localhost', port=5000, nickname='User'):
@@ -166,6 +173,11 @@ class CommunicationClient:
                 # Generate unique message ID
                 msg_id = str(uuid.uuid4())
                 
+                # Get reply data if replying
+                reply_data = None
+                if self.gui and self.gui.reply_to:
+                    reply_data = self.gui.reply_to.copy()
+                
                 # Encrypt message for each peer with their shared key
                 encrypted_messages = {}
                 for peer_nickname, shared_key in self.shared_keys.items():
@@ -184,6 +196,9 @@ class CommunicationClient:
                 if destruct_timer:
                     msg_packet["destruct_timer"] = destruct_timer
                 
+                if reply_data:
+                    msg_packet["reply_to"] = reply_data
+                
                 # Send encrypted messages via server
                 self.socket.send((json.dumps(msg_packet) + "\n").encode('utf-8'))
                 
@@ -191,7 +206,11 @@ class CommunicationClient:
                     display_msg = actual_message
                     if destruct_timer:
                         display_msg = f"{actual_message} 🔥 (self-destructs in {destruct_timer}s)"
-                    self.gui.display_message(display_msg, "YOU", msg_id=msg_id)
+                    self.gui.display_message(display_msg, "YOU", msg_id=msg_id, reply_to=reply_data)
+                    
+                    # Clear reply after sending
+                    if reply_data:
+                        self.gui.cancel_reply()
                     
                     # Schedule local deletion if self-destruct
                     if destruct_timer:
@@ -202,6 +221,54 @@ class CommunicationClient:
                         
         except Exception as e:
             error_msg = f"Error sending message: {e}"
+            if self.gui:
+                self.gui.display_message(error_msg, "ERROR")
+    
+    def send_gif(self, gif_url, destruct_timer=None):
+        """Send an encrypted GIF URL to all peers"""
+        try:
+            if self.connected and gif_url.strip():
+                if not self.shared_keys:
+                    if self.gui:
+                        self.gui.display_message("Waiting for other clients to join...", "SYSTEM")
+                    return
+                
+                # Generate unique message ID
+                msg_id = str(uuid.uuid4())
+                
+                # Encrypt GIF URL for each peer with their shared key
+                encrypted_gifs = {}
+                for peer_nickname, shared_key in self.shared_keys.items():
+                    cipher = Fernet(shared_key)
+                    encrypted_url = cipher.encrypt(gif_url.encode('utf-8')).decode('utf-8')
+                    encrypted_gifs[peer_nickname] = encrypted_url
+                
+                # Prepare packet
+                msg_packet = {
+                    "type": "DESTRUCT_GIF_MSG" if destruct_timer else "GIF_MSG",
+                    "from": self.nickname,
+                    "encrypted_gifs": encrypted_gifs,
+                    "msg_id": msg_id
+                }
+                
+                if destruct_timer:
+                    msg_packet["destruct_timer"] = destruct_timer
+                
+                # Send encrypted GIF via server
+                self.socket.send((json.dumps(msg_packet) + "\n").encode('utf-8'))
+                
+                if self.gui:
+                    self.gui.display_gif(gif_url, "YOU", msg_id=msg_id, destruct_timer=destruct_timer)
+                    
+                    # Schedule local deletion if self-destruct
+                    if destruct_timer:
+                        timer = threading.Timer(destruct_timer, self.delete_message, args=[msg_id])
+                        timer.daemon = True
+                        timer.start()
+                        self.message_timers[msg_id] = timer
+                        
+        except Exception as e:
+            error_msg = f"Error sending GIF: {e}"
             if self.gui:
                 self.gui.display_message(error_msg, "ERROR")
     
@@ -273,6 +340,7 @@ class CommunicationClient:
                 encrypted_messages = packet.get("encrypted_messages", {})
                 msg_id = packet.get("msg_id")
                 destruct_timer = packet.get("destruct_timer")
+                reply_to = packet.get("reply_to")
                 
                 # Find our encrypted message
                 if self.nickname in encrypted_messages:
@@ -289,7 +357,7 @@ class CommunicationClient:
                             formatted_msg = f"[{sender}]: {decrypted_msg} 🔥 ({destruct_timer}s)"
                         
                         if self.gui:
-                            self.gui.display_message(formatted_msg, "RECEIVED", msg_id=msg_id)
+                            self.gui.display_message(formatted_msg, "RECEIVED", msg_id=msg_id, reply_to=reply_to)
                             
                             # Schedule deletion if self-destruct
                             if destruct_timer:
@@ -301,6 +369,38 @@ class CommunicationClient:
                         if self.gui:
                             self.gui.display_message(
                                 f"Cannot decrypt message from {sender} - no shared key",
+                                "ERROR"
+                            )
+            
+            elif packet_type == "GIF_MSG" or packet_type == "DESTRUCT_GIF_MSG":
+                # Received encrypted GIF message
+                sender = packet.get("from")
+                encrypted_gifs = packet.get("encrypted_gifs", {})
+                msg_id = packet.get("msg_id")
+                destruct_timer = packet.get("destruct_timer")
+                
+                # Find our encrypted GIF
+                if self.nickname in encrypted_gifs:
+                    encrypted_url = encrypted_gifs[self.nickname]
+                    
+                    # Decrypt using shared key with sender
+                    if sender in self.shared_keys:
+                        cipher = Fernet(self.shared_keys[sender])
+                        gif_url = cipher.decrypt(encrypted_url.encode('utf-8')).decode('utf-8')
+                        
+                        if self.gui:
+                            self.gui.display_gif(gif_url, sender, msg_id=msg_id, destruct_timer=destruct_timer)
+                            
+                            # Schedule deletion if self-destruct
+                            if destruct_timer:
+                                timer = threading.Timer(destruct_timer, self.delete_message, args=[msg_id])
+                                timer.daemon = True
+                                timer.start()
+                                self.message_timers[msg_id] = timer
+                    else:
+                        if self.gui:
+                            self.gui.display_message(
+                                f"Cannot decrypt GIF from {sender} - no shared key",
                                 "ERROR"
                             )
             
@@ -342,6 +442,8 @@ class ChatGUI:
         self.client.gui = self
         self.user_colors = {}  # Dictionary to store colors for each user
         self.message_marks = {}  # msg_id -> (start_mark, end_mark) for deletion
+        self.message_data = {}  # msg_id -> {sender, text, timestamp} for replies
+        self.reply_to = None  # Current message being replied to {msg_id, sender, text}
         self.color_palette = [
             "#FF6B6B", "#4ECDC4", "#45B7D1", "#FFA07A", "#98D8C8",
             "#F7DC6F", "#BB8FCE", "#85C1E2", "#F8B739", "#52B788",
@@ -395,6 +497,9 @@ class ChatGUI:
         )
         self.chat_display.pack(fill=tk.BOTH, expand=True)
         
+        # Bind right-click for reply
+        self.chat_display.bind("<Button-3>", self.show_context_menu)
+        
         # Configure text tags for colored messages
         self.chat_display.tag_config("YOU", foreground="#4CAF50")
         self.chat_display.tag_config("SYSTEM", foreground="#FFC107")
@@ -404,6 +509,17 @@ class ChatGUI:
         # Message input area
         input_frame = tk.Frame(self.window, bg='#2b2b2b')
         input_frame.pack(padx=10, pady=(0, 10), fill=tk.X)
+        
+        # Reply indicator (hidden by default)
+        self.reply_frame = tk.Frame(input_frame, bg='#3c3c3c')
+        self.reply_label = tk.Label(self.reply_frame, text="", bg='#3c3c3c', fg='#FFD93D',
+                                   font=('Arial', 9), anchor=tk.W)
+        self.reply_label.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=5, pady=2)
+        
+        cancel_reply_btn = tk.Button(self.reply_frame, text="✕", command=self.cancel_reply,
+                                     bg='#3c3c3c', fg='white', font=('Arial', 9, 'bold'),
+                                     relief=tk.FLAT, cursor='hand2', padx=5)
+        cancel_reply_btn.pack(side=tk.RIGHT, padx=2)
         
         tk.Label(input_frame, text="Your Message", bg='#2b2b2b', fg='white',
                 font=('Arial', 10, 'bold')).pack(anchor=tk.W, pady=(0, 5))
@@ -436,6 +552,21 @@ class ChatGUI:
             pady=8
         )
         self.send_button.pack(side=tk.RIGHT)
+        
+        # GIF button
+        self.gif_button = tk.Button(
+            message_entry_frame,
+            text="🎬 GIF",
+            command=self.open_gif_search,
+            bg='#9C27B0',
+            fg='white',
+            font=('Arial', 10, 'bold'),
+            relief=tk.FLAT,
+            cursor='hand2',
+            padx=15,
+            pady=8
+        )
+        self.gif_button.pack(side=tk.RIGHT, padx=(0, 10))
         
         # Handle window close
         self.window.protocol("WM_DELETE_WINDOW", self.on_closing)
@@ -499,7 +630,7 @@ class ChatGUI:
             self.chat_display.tag_config(f"user_{username}", foreground=color)
         return f"user_{username}"
     
-    def display_message(self, message, tag="RECEIVED", msg_id=None):
+    def display_message(self, message, tag="RECEIVED", msg_id=None, reply_to=None):
         """Display a message in the chat window"""
         self.chat_display.configure(state=tk.NORMAL)
         
@@ -509,7 +640,22 @@ class ChatGUI:
         
         timestamp = self.get_timestamp()
         
+        # Extract sender and actual message text for storage
+        sender = None
+        message_text = message
+        
         if tag == "YOU":
+            sender = "YOU"
+            message_text = message
+            
+            # Show reply if present
+            if reply_to:
+                self.chat_display.insert(tk.END, f"[{timestamp}] ", "timestamp")
+                self.chat_display.insert(tk.END, "[YOU] ", tag)
+                self.chat_display.insert(tk.END, f"↩️ @{reply_to['sender']}: ", "timestamp")
+                reply_preview = reply_to['text'][:40] + "..." if len(reply_to['text']) > 40 else reply_to['text']
+                self.chat_display.insert(tk.END, f"\"{reply_preview}\"\n", "timestamp")
+            
             self.chat_display.insert(tk.END, f"[{timestamp}] ", "timestamp")
             self.chat_display.insert(tk.END, "[YOU] ", tag)
             self.chat_display.insert(tk.END, f"{message}\n")
@@ -518,21 +664,30 @@ class ChatGUI:
             if message.startswith("[") and "]:" in message:
                 bracket_end = message.index("]")
                 username = message[1:bracket_end]
-                rest_of_message = message[bracket_end+1:]
+                rest_of_message = message[bracket_end+1:].lstrip(":")
+                sender = username
+                message_text = rest_of_message.strip()
                 
                 # Show notification if window is not focused
                 if not self.window_focused:
                     # Get message preview (first 100 chars)
-                    message_text = rest_of_message.strip().lstrip(":")
                     preview = message_text[:100] + "..." if len(message_text) > 100 else message_text
                     self.show_notification(username, preview)
                 
                 # Get color tag for this user
                 user_tag = self.get_user_color(username)
                 
+                # Show reply if present
+                if reply_to:
+                    self.chat_display.insert(tk.END, f"[{timestamp}] ", "timestamp")
+                    self.chat_display.insert(tk.END, f"[{username}]", user_tag)
+                    self.chat_display.insert(tk.END, f" ↩️ @{reply_to['sender']}: ", "timestamp")
+                    reply_preview = reply_to['text'][:40] + "..." if len(reply_to['text']) > 40 else reply_to['text']
+                    self.chat_display.insert(tk.END, f"\"{reply_preview}\"\n", "timestamp")
+                
                 self.chat_display.insert(tk.END, f"[{timestamp}] ", "timestamp")
                 self.chat_display.insert(tk.END, f"[{username}]", user_tag)
-                self.chat_display.insert(tk.END, f"{rest_of_message}\n")
+                self.chat_display.insert(tk.END, f": {message_text}\n")
             else:
                 # Fallback for messages without username format
                 self.chat_display.insert(tk.END, f"[{timestamp}] ", "timestamp")
@@ -543,6 +698,14 @@ class ChatGUI:
         elif tag == "ERROR":
             self.chat_display.insert(tk.END, f"[{timestamp}] ", "timestamp")
             self.chat_display.insert(tk.END, f"[ERROR] {message}\n", tag)
+        
+        # Store message data for replies (only for actual messages, not system/error)
+        if msg_id and sender and tag in ["YOU", "RECEIVED"]:
+            self.message_data[msg_id] = {
+                'sender': sender,
+                'text': message_text,
+                'timestamp': timestamp
+            }
         
         # Mark end position and store if msg_id provided
         if msg_id:
@@ -558,6 +721,8 @@ class ChatGUI:
         self.chat_display.delete(1.0, tk.END)
         self.chat_display.configure(state=tk.DISABLED)
         self.message_marks.clear()
+        self.message_data.clear()
+        self.cancel_reply()
         self.display_message("Chat cleared", "SYSTEM")
     
     def delete_message_by_id(self, msg_id):
@@ -576,6 +741,308 @@ class ChatGUI:
             
             # Remove from tracking
             del self.message_marks[msg_id]
+            if msg_id in self.message_data:
+                del self.message_data[msg_id]
+    
+    def show_context_menu(self, event):
+        """Show context menu for replying to messages"""
+        # Get the index where right-click occurred
+        index = self.chat_display.index(f"@{event.x},{event.y}")
+        
+        # Find which message was clicked
+        clicked_msg_id = None
+        for msg_id, (start_mark, end_mark) in self.message_marks.items():
+            try:
+                start_idx = self.chat_display.index(start_mark)
+                end_idx = self.chat_display.index(end_mark)
+                
+                if self.chat_display.compare(index, ">=", start_idx) and \
+                   self.chat_display.compare(index, "<=", end_idx):
+                    clicked_msg_id = msg_id
+                    break
+            except tk.TclError:
+                continue
+        
+        if clicked_msg_id and clicked_msg_id in self.message_data:
+            # Create context menu
+            context_menu = tk.Menu(self.window, tearoff=0, bg='#2b2b2b', fg='white',
+                                  activebackground='#4CAF50', activeforeground='white')
+            context_menu.add_command(label="↩️ Reply to this message",
+                                    command=lambda: self.set_reply_to(clicked_msg_id))
+            context_menu.tk_popup(event.x_root, event.y_root)
+    
+    def set_reply_to(self, msg_id):
+        """Set the message to reply to"""
+        if msg_id in self.message_data:
+            msg_data = self.message_data[msg_id]
+            self.reply_to = {
+                'msg_id': msg_id,
+                'sender': msg_data['sender'],
+                'text': msg_data['text']
+            }
+            
+            # Show reply indicator
+            preview_text = msg_data['text'][:50]
+            if len(msg_data['text']) > 50:
+                preview_text += "..."
+            
+            self.reply_label.config(text=f"↩️ Replying to {msg_data['sender']}: {preview_text}")
+            self.reply_frame.pack(fill=tk.X, pady=(0, 5))
+            self.message_entry.focus()
+    
+    def cancel_reply(self):
+        """Cancel the current reply"""
+        self.reply_to = None
+        self.reply_frame.pack_forget()
+    
+    def display_gif(self, gif_url, sender, msg_id=None, destruct_timer=None):
+        """Display a GIF in the chat window"""
+        self.chat_display.configure(state=tk.NORMAL)
+        
+        # Mark start position if msg_id provided
+        if msg_id:
+            start_mark = self.chat_display.index(tk.END + "-1c")
+        
+        timestamp = self.get_timestamp()
+        
+        try:
+            # Download and display the GIF
+            response = requests.get(gif_url, timeout=5)
+            response.raise_for_status()
+            
+            img_data = BytesIO(response.content)
+            img = Image.open(img_data)
+            
+            # Resize if too large
+            max_width = 400
+            max_height = 300
+            img.thumbnail((max_width, max_height), Image.Resampling.LANCZOS)
+            
+            photo = ImageTk.PhotoImage(img)
+            
+            # Insert header
+            if sender == "YOU":
+                self.chat_display.insert(tk.END, f"[{timestamp}] ", "timestamp")
+                self.chat_display.insert(tk.END, "[YOU] ", "YOU")
+                if destruct_timer:
+                    self.chat_display.insert(tk.END, f"(🔥 {destruct_timer}s)\n")
+                else:
+                    self.chat_display.insert(tk.END, "\n")
+            else:
+                # Parse username if in format
+                user_tag = self.get_user_color(sender)
+                self.chat_display.insert(tk.END, f"[{timestamp}] ", "timestamp")
+                self.chat_display.insert(tk.END, f"[{sender}]", user_tag)
+                if destruct_timer:
+                    self.chat_display.insert(tk.END, f" (🔥 {destruct_timer}s)\n")
+                else:
+                    self.chat_display.insert(tk.END, "\n")
+            
+            # Insert the image
+            self.chat_display.image_create(tk.END, image=photo)
+            self.chat_display.insert(tk.END, "\n")
+            
+            # Keep a reference to prevent garbage collection
+            if not hasattr(self, 'gif_images'):
+                self.gif_images = []
+            self.gif_images.append(photo)
+            
+        except Exception as e:
+            # If GIF fails to load, show link instead
+            if sender == "YOU":
+                self.chat_display.insert(tk.END, f"[{timestamp}] ", "timestamp")
+                self.chat_display.insert(tk.END, "[YOU] ", "YOU")
+                self.chat_display.insert(tk.END, f"GIF: {gif_url}\n")
+            else:
+                user_tag = self.get_user_color(sender)
+                self.chat_display.insert(tk.END, f"[{timestamp}] ", "timestamp")
+                self.chat_display.insert(tk.END, f"[{sender}] ", user_tag)
+                self.chat_display.insert(tk.END, f"GIF: {gif_url}\n")
+        
+        # Mark end position and store if msg_id provided
+        if msg_id:
+            end_mark = self.chat_display.index(tk.END + "-1c")
+            self.message_marks[msg_id] = (start_mark, end_mark)
+        
+        self.chat_display.configure(state=tk.DISABLED)
+        self.chat_display.see(tk.END)
+    
+    def open_gif_search(self):
+        """Open a GIF search dialog"""
+        search_window = Toplevel(self.window)
+        search_window.title("Search GIFs - Tenor")
+        search_window.geometry("700x600")
+        search_window.configure(bg='#2b2b2b')
+        
+        # Search input
+        search_frame = Frame(search_window, bg='#2b2b2b')
+        search_frame.pack(padx=10, pady=10, fill=tk.X)
+        
+        Label(search_frame, text="Search:", bg='#2b2b2b', fg='white', 
+              font=('Arial', 11, 'bold')).pack(side=tk.LEFT, padx=(0, 10))
+        
+        search_entry = Entry(search_frame, font=('Arial', 11), bg='#3c3c3c', 
+                           fg='white', relief=tk.FLAT, insertbackground='white')
+        search_entry.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 10))
+        
+        def do_search():
+            query = search_entry.get().strip()
+            if query:
+                self.search_and_display_gifs(query, results_frame, search_window)
+        
+        search_entry.bind('<Return>', lambda e: do_search())
+        
+        search_btn = Button(search_frame, text="Search", command=do_search,
+                          bg='#9C27B0', fg='white', font=('Arial', 10, 'bold'),
+                          relief=tk.FLAT, cursor='hand2', padx=15, pady=5)
+        search_btn.pack(side=tk.RIGHT)
+        
+        # Results frame with scrollbar
+        results_container = Frame(search_window, bg='#2b2b2b')
+        results_container.pack(padx=10, pady=(0, 10), fill=tk.BOTH, expand=True)
+        
+        canvas = Canvas(results_container, bg='#1e1e1e', highlightthickness=0)
+        scrollbar = Scrollbar(results_container, orient=VERTICAL, command=canvas.yview)
+        results_frame = Frame(canvas, bg='#1e1e1e')
+        
+        results_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+        
+        canvas.create_window((0, 0), window=results_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+        
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        # Mouse wheel scrolling
+        def on_mousewheel(event):
+            canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+        canvas.bind_all("<MouseWheel>", on_mousewheel)
+        
+        # Initial message
+        Label(results_frame, text="Enter a search term and press Enter or click Search", 
+              bg='#1e1e1e', fg='#888888', font=('Arial', 11)).pack(pady=50)
+        
+        search_entry.focus()
+    
+    def search_and_display_gifs(self, query, results_frame, parent_window):
+        """Search Tenor API and display results"""
+        # Clear previous results
+        for widget in results_frame.winfo_children():
+            widget.destroy()
+        
+        Label(results_frame, text=f"Searching for '{query}'...", 
+              bg='#1e1e1e', fg='white', font=('Arial', 11)).pack(pady=20)
+        results_frame.update()
+        
+        try:
+            # Search Tenor API
+            params = {
+                'q': query,
+                'key': TENOR_API_KEY,
+                'limit': 20,
+                'media_filter': 'gif'
+            }
+            
+            response = requests.get(TENOR_API_URL, params=params, timeout=10)
+            response.raise_for_status()
+            data = response.json()
+            
+            # Clear loading message
+            for widget in results_frame.winfo_children():
+                widget.destroy()
+            
+            results = data.get('results', [])
+            
+            if not results:
+                Label(results_frame, text="No GIFs found. Try a different search.", 
+                      bg='#1e1e1e', fg='#888888', font=('Arial', 11)).pack(pady=50)
+                return
+            
+            # Display GIFs in a grid
+            row = 0
+            col = 0
+            max_cols = 3
+            loaded_count = 0
+            
+            for gif_data in results:
+                try:
+                    # Get GIF URL (use smaller preview for display)
+                    media_formats = gif_data.get('media_formats', {})
+                    
+                    # Try different preview formats in order of preference
+                    preview_url = None
+                    gif_url = None
+                    
+                    if 'tinygif' in media_formats:
+                        preview_url = media_formats['tinygif']['url']
+                    elif 'nanogif' in media_formats:
+                        preview_url = media_formats['nanogif']['url']
+                    elif 'gif' in media_formats:
+                        preview_url = media_formats['gif']['url']
+                    
+                    if 'gif' in media_formats:
+                        gif_url = media_formats['gif']['url']
+                    elif 'mediumgif' in media_formats:
+                        gif_url = media_formats['mediumgif']['url']
+                    
+                    if not preview_url or not gif_url:
+                        continue
+                    
+                    # Create frame for this GIF
+                    gif_frame = Frame(results_frame, bg='#1e1e1e', relief=tk.RAISED, borderwidth=1)
+                    gif_frame.grid(row=row, column=col, padx=5, pady=5, sticky='nsew')
+                    
+                    # Load preview image
+                    img_response = requests.get(preview_url, timeout=10)
+                    img_response.raise_for_status()
+                    img_data = BytesIO(img_response.content)
+                    img = Image.open(img_data)
+                    img.thumbnail((200, 200), Image.Resampling.LANCZOS)
+                    photo = ImageTk.PhotoImage(img)
+                    
+                    # Create button with image
+                    def send_this_gif(url=gif_url):
+                        self.client.send_gif(url)
+                        parent_window.destroy()
+                    
+                    gif_btn = Button(gif_frame, image=photo, command=send_this_gif,
+                                   bg='#1e1e1e', relief=tk.FLAT, cursor='hand2')
+                    gif_btn.image = photo  # Keep reference
+                    gif_btn.pack(padx=2, pady=2)
+                    
+                    loaded_count += 1
+                    col += 1
+                    if col >= max_cols:
+                        col = 0
+                        row += 1
+                        
+                except Exception as e:
+                    # Print error for debugging but continue loading others
+                    print(f"Failed to load GIF preview: {e}")
+                    continue
+            
+            # If no GIFs loaded, show error
+            if loaded_count == 0:
+                Label(results_frame, text="Failed to load GIF previews. Check your internet connection.", 
+                      bg='#1e1e1e', fg='#f44336', font=('Arial', 11)).pack(pady=50)
+            
+            # Configure grid weights
+            for i in range(max_cols):
+                results_frame.grid_columnconfigure(i, weight=1)
+                
+        except requests.exceptions.RequestException as e:
+            for widget in results_frame.winfo_children():
+                widget.destroy()
+            Label(results_frame, text=f"Error searching GIFs: {e}", 
+                  bg='#1e1e1e', fg='#f44336', font=('Arial', 11)).pack(pady=50)
+        except Exception as e:
+            for widget in results_frame.winfo_children():
+                widget.destroy()
+            Label(results_frame, text=f"Unexpected error: {e}", 
+                  bg='#1e1e1e', fg='#f44336', font=('Arial', 11)).pack(pady=50)
     
     def send_message(self):
         """Send message from entry field"""
