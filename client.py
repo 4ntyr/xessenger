@@ -453,7 +453,7 @@ class ChatGUI:
         self.window_focused = True  # Track if window has focus
         
         self.window = tk.Tk()
-        self.window.title(f"Chat Client - {self.client.nickname}")
+        self.window.title(f"Xessenger - {self.client.nickname}")
         self.window.geometry("600x500")
         self.window.configure(bg='#2b2b2b')
         
@@ -465,7 +465,7 @@ class ChatGUI:
         header_frame = tk.Frame(chat_frame, bg='#2b2b2b')
         header_frame.pack(fill=tk.X, pady=(0, 5))
         
-        tk.Label(header_frame, text="Chat Messages", bg='#2b2b2b', fg='white', 
+        tk.Label(header_frame, text="Xessages", bg='#2b2b2b', fg='white', 
                 font=('Arial', 12, 'bold')).pack(side=tk.LEFT)
         
         self.clear_button = tk.Button(
@@ -521,7 +521,7 @@ class ChatGUI:
                                      relief=tk.FLAT, cursor='hand2', padx=5)
         cancel_reply_btn.pack(side=tk.RIGHT, padx=2)
         
-        tk.Label(input_frame, text="Your Message", bg='#2b2b2b', fg='white',
+        tk.Label(input_frame, text="Your Xessage", bg='#2b2b2b', fg='white',
                 font=('Arial', 10, 'bold')).pack(anchor=tk.W, pady=(0, 5))
         
         message_entry_frame = tk.Frame(input_frame, bg='#2b2b2b')
@@ -587,8 +587,8 @@ class ChatGUI:
         """Show Windows notification for new message"""
         try:
             toast = Notification(
-                app_id="Chat Client",
-                title=f"New message from {username}",
+                app_id="Xessenger",
+                title=f"New xessage from {username}",
                 msg=message_preview,
                 duration="short"
             )
@@ -814,8 +814,8 @@ class ChatGUI:
             img = Image.open(img_data)
             
             # Resize if too large
-            max_width = 400
-            max_height = 300
+            max_width = 200
+            max_height = 150
             img.thumbnail((max_width, max_height), Image.Resampling.LANCZOS)
             
             photo = ImageTk.PhotoImage(img)
