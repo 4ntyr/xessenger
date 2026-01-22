@@ -6,6 +6,7 @@ GUI Application with Encryption
 import socket
 import threading
 import sys
+import ssl
 import tkinter as tk
 from tkinter import scrolledtext, messagebox, simpledialog, Toplevel, Label, Entry, Button, Frame, Canvas, Scrollbar, VERTICAL, HORIZONTAL
 from cryptography.hazmat.primitives.asymmetric import dh
@@ -49,6 +50,8 @@ class CommunicationClient:
         self.pending_messages = []  # Messages waiting for key exchange
         self.message_timers = {}  # msg_id -> threading.Timer for self-destruct
         self.server_password = None  # Server password for authentication
+        self.use_tls = True  # Use TLS/SSL for connection
+        self.verify_cert = False  # Set to True for production with valid certificates
     
     def generate_dh_parameters(self):
         """Generate Diffie-Hellman parameters (shared by all clients)"""
@@ -104,10 +107,27 @@ class CommunicationClient:
     def connect(self):
         """Connect to the communication server"""
         try:
-            # Generate DH keys for E2E encryption
+            # Generate DH keys for E2E encryption (Perfect Forward Secrecy)
             self.generate_dh_keys()
             
             self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            
+            # Wrap with TLS/SSL
+            if self.use_tls:
+                try:
+                    ssl_context = ssl.create_default_context()
+                    if not self.verify_cert:
+                        # For self-signed certificates
+                        ssl_context.check_hostname = False
+                        ssl_context.verify_mode = ssl.CERT_NONE
+                    self.socket = ssl_context.wrap_socket(self.socket, server_hostname=self.host)
+                    if self.gui:
+                        self.gui.display_message("🔒 TLS/SSL connection established", "SYSTEM")
+                except Exception as e:
+                    if self.gui:
+                        self.gui.display_message(f"⚠️ TLS error: {e}", "ERROR")
+                    raise
+            
             self.socket.connect((self.host, self.port))
             
             # First, handle authentication if password is set
@@ -218,12 +238,14 @@ class CommunicationClient:
                     encrypted_msg = cipher.encrypt(actual_message.encode('utf-8')).decode('utf-8')
                     encrypted_messages[peer_nickname] = encrypted_msg
                 
-                # Prepare packet
+                # Prepare packet with replay protection
                 msg_packet = {
                     "type": "DESTRUCT_MSG" if destruct_timer else "MSG",
                     "from": self.nickname,
                     "encrypted_messages": encrypted_messages,
-                    "msg_id": msg_id
+                    "msg_id": msg_id,
+                    "nonce": str(uuid.uuid4()),  # Replay protection
+                    "timestamp": time.time()  # Replay protection
                 }
                 
                 if destruct_timer:
