@@ -22,6 +22,7 @@ from zoneinfo import ZoneInfo
 import requests
 from PIL import Image, ImageTk
 from io import BytesIO
+import hashlib
 
 # Tenor API configuration
 TENOR_API_KEY = "AIzaSyAyimkuYQYF_FXVALexPuGQctUWRURdCYQ"  # Default key, users should get their own
@@ -43,8 +44,11 @@ class CommunicationClient:
         self.dh_public_key = None
         self.shared_keys = {}  # nickname -> shared Fernet key
         self.peer_public_keys = {}  # nickname -> DH public key
+        self.peer_fingerprints = {}  # nickname -> key fingerprint
+        self.trusted_keys = {}  # nickname -> fingerprint (manually verified)
         self.pending_messages = []  # Messages waiting for key exchange
         self.message_timers = {}  # msg_id -> threading.Timer for self-destruct
+        self.server_password = None  # Server password for authentication
     
     def generate_dh_parameters(self):
         """Generate Diffie-Hellman parameters (shared by all clients)"""
@@ -74,6 +78,13 @@ class CommunicationClient:
             format=serialization.PublicFormat.SubjectPublicKeyInfo
         )
     
+    def generate_fingerprint(self, public_key_bytes):
+        """Generate SHA-256 fingerprint of public key for verification"""
+        sha256_hash = hashlib.sha256(public_key_bytes).hexdigest()
+        # Format as readable fingerprint: XX:XX:XX:...
+        fingerprint = ':'.join(sha256_hash[i:i+2].upper() for i in range(0, len(sha256_hash), 2))
+        return fingerprint
+    
     def derive_shared_key(self, peer_public_key_bytes):
         """Derive shared encryption key from peer's public key"""
         peer_public_key = serialization.load_pem_public_key(peer_public_key_bytes)
@@ -98,6 +109,28 @@ class CommunicationClient:
             
             self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.socket.connect((self.host, self.port))
+            
+            # First, handle authentication if password is set
+            if self.server_password:
+                auth_packet = json.dumps({"type": "AUTH", "password": self.server_password})
+                self.socket.send((auth_packet + "\n").encode('utf-8'))
+                
+                # Wait for authentication response
+                auth_response = self.socket.recv(4096).decode('utf-8')
+                if auth_response:
+                    try:
+                        auth_data = json.loads(auth_response.strip())
+                        if auth_data.get("type") == "AUTH_RESULT":
+                            if not auth_data.get("success"):
+                                error_msg = auth_data.get("message", "Authentication failed")
+                                if self.gui:
+                                    self.gui.display_message(error_msg, "ERROR")
+                                    messagebox.showerror("Authentication Failed", error_msg)
+                                self.connected = False
+                                return
+                    except:
+                        pass
+            
             self.connected = True
             
             if self.gui:
@@ -321,18 +354,57 @@ class CommunicationClient:
                 public_key_pem = packet.get("public_key")
                 
                 if peer_nickname != self.nickname:
+                    public_key_bytes = public_key_pem.encode('utf-8')
+                    fingerprint = self.generate_fingerprint(public_key_bytes)
+                    
+                    # Check if we've seen this user before
+                    if peer_nickname in self.peer_fingerprints:
+                        old_fingerprint = self.peer_fingerprints[peer_nickname]
+                        if old_fingerprint != fingerprint:
+                            # KEY CHANGED - Possible MITM attack!
+                            if self.gui:
+                                warning = f"⚠️ WARNING: {peer_nickname}'s key has CHANGED!\n"
+                                warning += "This could be a Man-in-the-Middle attack!\n"
+                                warning += f"Old: {old_fingerprint[:32]}...\n"
+                                warning += f"New: {fingerprint[:32]}..."
+                                self.gui.display_message(warning, "ERROR")
+                                messagebox.showwarning(
+                                    "Security Warning",
+                                    f"{peer_nickname}'s encryption key has changed!\n\n"
+                                    "This could indicate a security issue.\n\n"
+                                    "Verify the new fingerprint with this user through another channel."
+                                )
+                    
+                    # Store fingerprint
+                    self.peer_fingerprints[peer_nickname] = fingerprint
+                    
                     # Store peer's public key
-                    self.peer_public_keys[peer_nickname] = public_key_pem.encode('utf-8')
+                    self.peer_public_keys[peer_nickname] = public_key_bytes
                     
                     # Derive shared key
-                    shared_key = self.derive_shared_key(public_key_pem.encode('utf-8'))
+                    shared_key = self.derive_shared_key(public_key_bytes)
                     self.shared_keys[peer_nickname] = shared_key
                     
                     if self.gui:
+                        # Show fingerprint for manual verification
+                        short_fp = fingerprint[:47]  # First 16 bytes
                         self.gui.display_message(
-                            f"🔒 Secure connection established with {peer_nickname}",
+                            f"🔒 Secure connection with {peer_nickname}\n    Fingerprint: {short_fp}...",
                             "SYSTEM"
                         )
+                        
+                        # Check if this key is in trusted list
+                        if peer_nickname in self.trusted_keys:
+                            if self.trusted_keys[peer_nickname] == fingerprint:
+                                self.gui.display_message(
+                                    f"✓ {peer_nickname}'s key is verified (trusted)",
+                                    "SYSTEM"
+                                )
+                            else:
+                                self.gui.display_message(
+                                    f"⚠️ {peer_nickname}'s key does NOT match trusted fingerprint!",
+                                    "ERROR"
+                                )
             
             elif packet_type == "MSG" or packet_type == "DESTRUCT_MSG":
                 # Received encrypted message
@@ -468,6 +540,21 @@ class ChatGUI:
         
         tk.Label(header_frame, text="Xessages", bg='#2b2b2b', fg='white', 
                 font=('Arial', 12, 'bold')).pack(side=tk.LEFT)
+        
+        # Security button to view fingerprints
+        self.security_button = tk.Button(
+            header_frame,
+            text="🔐 Security",
+            command=self.show_security_info,
+            bg='#444444',
+            fg='white',
+            font=('Arial', 9),
+            relief=tk.FLAT,
+            cursor='hand2',
+            padx=10,
+            pady=3
+        )
+        self.security_button.pack(side=tk.RIGHT, padx=(0, 5))
         
         self.clear_button = tk.Button(
             header_frame,
@@ -798,6 +885,127 @@ class ChatGUI:
         """Cancel the current reply"""
         self.reply_to = None
         self.reply_frame.pack_forget()
+    
+    def show_security_info(self):
+        """Show security information and key fingerprints"""
+        security_window = Toplevel(self.window)
+        security_window.title("Security & Key Verification")
+        security_window.geometry("700x500")
+        security_window.configure(bg='#2b2b2b')
+        
+        # Header
+        header = Label(security_window, text="🔐 Encryption Key Fingerprints", 
+                      bg='#2b2b2b', fg='white', font=('Arial', 14, 'bold'))
+        header.pack(pady=15)
+        
+        info = Label(security_window, 
+                    text="Verify these fingerprints with your contacts through another secure channel\\n(phone call, in person, etc.) to prevent Man-in-the-Middle attacks.",
+                    bg='#2b2b2b', fg='#FFC107', font=('Arial', 9), justify=tk.CENTER)
+        info.pack(pady=(0, 15))
+        
+        # Scrollable list
+        list_frame = Frame(security_window, bg='#2b2b2b')
+        list_frame.pack(padx=20, pady=(0, 20), fill=tk.BOTH, expand=True)
+        
+        canvas = Canvas(list_frame, bg='#1e1e1e', highlightthickness=0)
+        scrollbar = Scrollbar(list_frame, orient=VERTICAL, command=canvas.yview)
+        content_frame = Frame(canvas, bg='#1e1e1e')
+        
+        content_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+        
+        canvas.create_window((0, 0), window=content_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+        
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        # Your own fingerprint
+        if self.client.dh_public_key:
+            own_key_bytes = self.client.serialize_public_key()
+            own_fp = self.client.generate_fingerprint(own_key_bytes)
+            
+            own_frame = Frame(content_frame, bg='#2b2b2b', relief=tk.RAISED, borderwidth=2)
+            own_frame.pack(fill=tk.X, padx=10, pady=10)
+            
+            Label(own_frame, text=f"YOUR Key ({self.client.nickname})", 
+                 bg='#2b2b2b', fg='#4CAF50', font=('Arial', 11, 'bold')).pack(anchor=tk.W, padx=10, pady=(10, 5))
+            
+            fp_text = tk.Text(own_frame, height=3, width=60, bg='#3c3c3c', fg='white',
+                            font=('Courier', 9), relief=tk.FLAT, padx=10, pady=5)
+            fp_text.insert('1.0', own_fp)
+            fp_text.config(state=tk.DISABLED)
+            fp_text.pack(padx=10, pady=(0, 10))
+        
+        # Peer fingerprints
+        if self.client.peer_fingerprints:
+            for peer_nickname, fingerprint in self.client.peer_fingerprints.items():
+                peer_frame = Frame(content_frame, bg='#3c3c3c', relief=tk.RAISED, borderwidth=1)
+                peer_frame.pack(fill=tk.X, padx=10, pady=5)
+                
+                # Check if trusted
+                is_trusted = peer_nickname in self.client.trusted_keys and \
+                           self.client.trusted_keys[peer_nickname] == fingerprint
+                
+                status_text = " ✓ TRUSTED" if is_trusted else ""
+                color = "#4CAF50" if is_trusted else "#FFA07A"
+                
+                Label(peer_frame, text=f"{peer_nickname}{status_text}", 
+                     bg='#3c3c3c', fg=color, font=('Arial', 10, 'bold')).pack(anchor=tk.W, padx=10, pady=(8, 3))
+                
+                fp_text = tk.Text(peer_frame, height=3, width=60, bg='#2b2b2b', fg='white',
+                                font=('Courier', 8), relief=tk.FLAT, padx=10, pady=5)
+                fp_text.insert('1.0', fingerprint)
+                fp_text.config(state=tk.DISABLED)
+                fp_text.pack(padx=10, pady=(0, 5))
+                
+                # Trust button
+                btn_frame = Frame(peer_frame, bg='#3c3c3c')
+                btn_frame.pack(fill=tk.X, padx=10, pady=(0, 8))
+                
+                if is_trusted:
+                    Button(btn_frame, text="Remove Trust", 
+                          command=lambda n=peer_nickname: self.untrust_key(n),
+                          bg='#f44336', fg='white', font=('Arial', 8),
+                          relief=tk.FLAT, cursor='hand2', padx=10, pady=3).pack(side=tk.LEFT)
+                else:
+                    Button(btn_frame, text="✓ Mark as Trusted", 
+                          command=lambda n=peer_nickname, fp=fingerprint: self.trust_key(n, fp),
+                          bg='#4CAF50', fg='white', font=('Arial', 8),
+                          relief=tk.FLAT, cursor='hand2', padx=10, pady=3).pack(side=tk.LEFT)
+        else:
+            Label(content_frame, text="No peer connections yet", 
+                 bg='#1e1e1e', fg='#888888', font=('Arial', 11)).pack(pady=50)
+        
+        # Close button
+        Button(security_window, text="Close", command=security_window.destroy,
+              bg='#444444', fg='white', font=('Arial', 10, 'bold'),
+              relief=tk.FLAT, cursor='hand2', padx=20, pady=8).pack(pady=(0, 15))
+    
+    def trust_key(self, nickname, fingerprint):
+        """Mark a key as trusted"""
+        self.client.trusted_keys[nickname] = fingerprint
+        self.display_message(f"✓ Marked {nickname}'s key as trusted", "SYSTEM")
+        # Refresh security window if it's open
+        for widget in self.window.winfo_children():
+            if isinstance(widget, tk.Toplevel):
+                if widget.title() == "Security & Key Verification":
+                    widget.destroy()
+                    self.show_security_info()
+    
+    def untrust_key(self, nickname):
+        """Remove trust from a key"""
+        if nickname in self.client.trusted_keys:
+            del self.client.trusted_keys[nickname]
+            self.display_message(f"Removed trust from {nickname}'s key", "SYSTEM")
+            # Refresh security window if it's open
+            for widget in self.window.winfo_children():
+                if isinstance(widget, tk.Toplevel):
+                    if widget.title() == "Security & Key Verification":
+                        widget.destroy()
+                        self.show_security_info()
     
     def display_gif(self, gif_url, sender, msg_id=None, destruct_timer=None):
         """Display a GIF in the chat window"""
@@ -1177,10 +1385,27 @@ if __name__ == "__main__":
         if not nickname or not nickname.strip():
             nickname = "Anonymous"
     
+    # Ask for server password
+    password = None
+    if len(sys.argv) > 4:
+        password = sys.argv[4]
+    else:
+        use_password = messagebox.askyesno(
+            "Server Password",
+            "Does this server require a password?"
+        )
+        if use_password:
+            password = simpledialog.askstring(
+                "Server Password",
+                "Enter server password:",
+                show='*'
+            )
+    
     root.destroy()
     
     # Create client and GUI
     client = CommunicationClient(host=host, port=port, nickname=nickname)
+    client.server_password = password  # Set password for authentication
     gui = ChatGUI(client)
     
     # Connect to server in background thread
