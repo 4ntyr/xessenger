@@ -989,116 +989,140 @@ class ChatGUI:
         for widget in results_frame.winfo_children():
             widget.destroy()
         
-        Label(results_frame, text=f"Searching for '{query}'...", 
-              bg='#1e1e1e', fg='white', font=('Arial', 11)).pack(pady=20)
+        loading_label = Label(results_frame, text=f"Searching for '{query}'...", 
+              bg='#1e1e1e', fg='white', font=('Arial', 11))
+        loading_label.pack(pady=20)
         results_frame.update()
         
-        try:
-            # Search Tenor API
-            params = {
-                'q': query,
-                'key': TENOR_API_KEY,
-                'limit': 20,
-                'media_filter': 'gif'
-            }
-            
-            response = requests.get(TENOR_API_URL, params=params, timeout=10)
-            response.raise_for_status()
-            data = response.json()
-            
-            # Clear loading message
-            for widget in results_frame.winfo_children():
-                widget.destroy()
-            
-            results = data.get('results', [])
-            
-            if not results:
-                Label(results_frame, text="No GIFs found. Try a different search.", 
-                      bg='#1e1e1e', fg='#888888', font=('Arial', 11)).pack(pady=50)
-                return
-            
-            # Display GIFs in a grid
-            row = 0
-            col = 0
-            max_cols = 3
-            loaded_count = 0
-            
-            for gif_data in results:
-                try:
-                    # Get GIF URL (use smaller preview for display)
-                    media_formats = gif_data.get('media_formats', {})
-                    
-                    # Try different preview formats in order of preference
-                    preview_url = None
-                    gif_url = None
-                    
-                    if 'tinygif' in media_formats:
-                        preview_url = media_formats['tinygif']['url']
-                    elif 'nanogif' in media_formats:
-                        preview_url = media_formats['nanogif']['url']
-                    elif 'gif' in media_formats:
-                        preview_url = media_formats['gif']['url']
-                    
-                    if 'gif' in media_formats:
-                        gif_url = media_formats['gif']['url']
-                    elif 'mediumgif' in media_formats:
-                        gif_url = media_formats['mediumgif']['url']
-                    
-                    if not preview_url or not gif_url:
-                        continue
-                    
-                    # Create frame for this GIF
-                    gif_frame = Frame(results_frame, bg='#1e1e1e', relief=tk.RAISED, borderwidth=1)
-                    gif_frame.grid(row=row, column=col, padx=5, pady=5, sticky='nsew')
-                    
-                    # Load preview image
-                    img_response = requests.get(preview_url, timeout=10)
-                    img_response.raise_for_status()
-                    img_data = BytesIO(img_response.content)
-                    img = Image.open(img_data)
-                    img.thumbnail((200, 200), Image.Resampling.LANCZOS)
-                    photo = ImageTk.PhotoImage(img)
-                    
-                    # Create button with image
-                    def send_this_gif(url=gif_url):
-                        self.client.send_gif(url)
-                        parent_window.destroy()
-                    
-                    gif_btn = Button(gif_frame, image=photo, command=send_this_gif,
-                                   bg='#1e1e1e', relief=tk.FLAT, cursor='hand2')
-                    gif_btn.image = photo  # Keep reference
-                    gif_btn.pack(padx=2, pady=2)
-                    
-                    loaded_count += 1
-                    col += 1
-                    if col >= max_cols:
-                        col = 0
-                        row += 1
-                        
-                except Exception as e:
-                    # Print error for debugging but continue loading others
-                    print(f"Failed to load GIF preview: {e}")
-                    continue
-            
-            # If no GIFs loaded, show error
-            if loaded_count == 0:
-                Label(results_frame, text="Failed to load GIF previews. Check your internet connection.", 
-                      bg='#1e1e1e', fg='#f44336', font=('Arial', 11)).pack(pady=50)
-            
-            # Configure grid weights
-            for i in range(max_cols):
-                results_frame.grid_columnconfigure(i, weight=1)
+        def load_results_async():
+            try:
+                # Search Tenor API
+                params = {
+                    'q': query,
+                    'key': TENOR_API_KEY,
+                    'limit': 20,
+                    'media_filter': 'gif'
+                }
                 
-        except requests.exceptions.RequestException as e:
-            for widget in results_frame.winfo_children():
-                widget.destroy()
-            Label(results_frame, text=f"Error searching GIFs: {e}", 
-                  bg='#1e1e1e', fg='#f44336', font=('Arial', 11)).pack(pady=50)
-        except Exception as e:
-            for widget in results_frame.winfo_children():
-                widget.destroy()
-            Label(results_frame, text=f"Unexpected error: {e}", 
-                  bg='#1e1e1e', fg='#f44336', font=('Arial', 11)).pack(pady=50)
+                response = requests.get(TENOR_API_URL, params=params, timeout=10)
+                response.raise_for_status()
+                data = response.json()
+                
+                results = data.get('results', [])
+                
+                # Update UI on main thread
+                self.window.after(0, lambda: self.display_gif_results(results, results_frame, parent_window, loading_label))
+                
+            except requests.exceptions.RequestException as e:
+                self.window.after(0, lambda: self.show_gif_error(results_frame, f"Error searching GIFs: {e}"))
+            except Exception as e:
+                self.window.after(0, lambda: self.show_gif_error(results_frame, f"Unexpected error: {e}"))
+        
+        # Start search in background thread
+        search_thread = threading.Thread(target=load_results_async, daemon=True)
+        search_thread.start()
+    
+    def show_gif_error(self, results_frame, error_msg):
+        """Show error message in results frame"""
+        for widget in results_frame.winfo_children():
+            widget.destroy()
+        Label(results_frame, text=error_msg, 
+              bg='#1e1e1e', fg='#f44336', font=('Arial', 11)).pack(pady=50)
+    
+    def display_gif_results(self, results, results_frame, parent_window, loading_label):
+        """Display GIF search results progressively"""
+        # Clear loading message
+        loading_label.destroy()
+        
+        if not results:
+            Label(results_frame, text="No GIFs found. Try a different search.", 
+                  bg='#1e1e1e', fg='#888888', font=('Arial', 11)).pack(pady=50)
+            return
+        
+        # Create grid container
+        max_cols = 3
+        gif_positions = []
+        
+        # Pre-create all frames first (fast)
+        for idx, gif_data in enumerate(results):
+            row = idx // max_cols
+            col = idx % max_cols
+            
+            media_formats = gif_data.get('media_formats', {})
+            
+            # Try different preview formats in order of preference
+            preview_url = None
+            gif_url = None
+            
+            if 'tinygif' in media_formats:
+                preview_url = media_formats['tinygif']['url']
+            elif 'nanogif' in media_formats:
+                preview_url = media_formats['nanogif']['url']
+            elif 'gif' in media_formats:
+                preview_url = media_formats['gif']['url']
+            
+            if 'gif' in media_formats:
+                gif_url = media_formats['gif']['url']
+            elif 'mediumgif' in media_formats:
+                gif_url = media_formats['mediumgif']['url']
+            
+            if not preview_url or not gif_url:
+                continue
+            
+            # Create frame with placeholder
+            gif_frame = Frame(results_frame, bg='#1e1e1e', relief=tk.RAISED, borderwidth=1)
+            gif_frame.grid(row=row, column=col, padx=5, pady=5, sticky='nsew')
+            
+            placeholder = Label(gif_frame, text="Loading...", bg='#1e1e1e', fg='#888888',
+                              font=('Arial', 9), width=20, height=10)
+            placeholder.pack(padx=2, pady=2)
+            
+            gif_positions.append({
+                'frame': gif_frame,
+                'placeholder': placeholder,
+                'preview_url': preview_url,
+                'gif_url': gif_url
+            })
+        
+        # Configure grid weights
+        for i in range(max_cols):
+            results_frame.grid_columnconfigure(i, weight=1)
+        
+        # Load GIF previews progressively in background
+        def load_gif_preview(position_data):
+            try:
+                img_response = requests.get(position_data['preview_url'], timeout=10)
+                img_response.raise_for_status()
+                img_data = BytesIO(img_response.content)
+                img = Image.open(img_data)
+                img.thumbnail((200, 200), Image.Resampling.LANCZOS)
+                photo = ImageTk.PhotoImage(img)
+                
+                # Update UI on main thread
+                def update_preview():
+                    try:
+                        position_data['placeholder'].destroy()
+                        
+                        def send_this_gif(url=position_data['gif_url']):
+                            self.client.send_gif(url)
+                            parent_window.destroy()
+                        
+                        gif_btn = Button(position_data['frame'], image=photo, command=send_this_gif,
+                                       bg='#1e1e1e', relief=tk.FLAT, cursor='hand2')
+                        gif_btn.image = photo  # Keep reference
+                        gif_btn.pack(padx=2, pady=2)
+                    except:
+                        pass  # Widget might have been destroyed
+                
+                self.window.after(0, update_preview)
+            except Exception as e:
+                # Silently fail for individual GIFs
+                pass
+        
+        # Load all GIF previews in parallel
+        for pos_data in gif_positions:
+            load_thread = threading.Thread(target=load_gif_preview, args=(pos_data,), daemon=True)
+            load_thread.start()
     
     def send_message(self):
         """Send message from entry field"""
