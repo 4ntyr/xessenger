@@ -314,6 +314,19 @@ class CommunicationClient:
         if msg_id in self.message_timers:
             del self.message_timers[msg_id]
     
+    def send_typing_status(self, is_typing):
+        """Send typing status to server"""
+        try:
+            if self.connected and self.socket:
+                typing_packet = json.dumps({
+                    "type": "TYPING",
+                    "from": self.nickname,
+                    "is_typing": is_typing
+                })
+                self.socket.send((typing_packet + "\n").encode('utf-8'))
+        except Exception as e:
+            pass  # Silently fail for typing indicators
+    
     def receive_messages(self):
         """Receive messages from the server"""
         buffer = ""
@@ -482,6 +495,18 @@ class CommunicationClient:
                 if self.gui:
                     self.gui.display_message(sys_msg, "SYSTEM")
             
+            elif packet_type == "TYPING":
+                # User is typing
+                sender = packet.get("from")
+                is_typing = packet.get("is_typing", False)
+                
+                if self.gui and sender != self.nickname:
+                    if is_typing:
+                        self.gui.typing_users.add(sender)
+                    else:
+                        self.gui.typing_users.discard(sender)
+                    self.gui.update_typing_indicator()
+            
             elif packet_type == "USER_LEFT":
                 # User disconnected
                 left_user = packet.get("nickname")
@@ -490,6 +515,9 @@ class CommunicationClient:
                 if left_user in self.peer_public_keys:
                     del self.peer_public_keys[left_user]
                 if self.gui:
+                    # Remove from typing users if present
+                    self.gui.typing_users.discard(left_user)
+                    self.gui.update_typing_indicator()
                     self.gui.display_message(f"{left_user} left the chat", "SYSTEM")
                     
         except Exception as e:
@@ -516,6 +544,8 @@ class ChatGUI:
         self.message_marks = {}  # msg_id -> (start_mark, end_mark) for deletion
         self.message_data = {}  # msg_id -> {sender, text, timestamp} for replies
         self.reply_to = None  # Current message being replied to {msg_id, sender, text}
+        self.typing_users = set()  # Set of users currently typing
+        self.typing_timer = None  # Timer to stop sending typing status
         self.color_palette = [
             "#FF6B6B", "#4ECDC4", "#45B7D1", "#FFA07A", "#98D8C8",
             "#F7DC6F", "#BB8FCE", "#85C1E2", "#F8B739", "#52B788",
@@ -527,7 +557,7 @@ class ChatGUI:
         
         self.window = tk.Tk()
         self.window.title(f"Xessenger - {self.client.nickname}")
-        self.window.geometry("600x500")
+        self.window.geometry("600x560")
         self.window.configure(bg='#2b2b2b')
         
         # Chat display area
@@ -585,6 +615,18 @@ class ChatGUI:
         )
         self.chat_display.pack(fill=tk.BOTH, expand=True)
         
+        # Typing indicator
+        self.typing_label = tk.Label(
+            chat_frame,
+            text="",
+            bg='#2b2b2b',
+            fg='#888888',
+            font=('Arial', 9, 'italic'),
+            anchor=tk.W,
+            height=1
+        )
+        self.typing_label.pack(fill=tk.X, pady=(5, 0))
+        
         # Bind right-click for reply
         self.chat_display.bind("<Button-3>", self.show_context_menu)
         
@@ -625,6 +667,7 @@ class ChatGUI:
         )
         self.message_entry.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 10), ipady=8)
         self.message_entry.bind('<Return>', lambda e: self.send_message())
+        self.message_entry.bind('<KeyPress>', lambda e: self.on_key_press(e))
         self.message_entry.focus()
         
         self.send_button = tk.Button(
@@ -1332,10 +1375,48 @@ class ChatGUI:
             load_thread = threading.Thread(target=load_gif_preview, args=(pos_data,), daemon=True)
             load_thread.start()
     
+    def on_key_press(self, event):
+        """Handle key press in message entry"""
+        # Ignore Enter key (handled by send_message)
+        if event.keysym == 'Return':
+            return
+        
+        # Send typing indicator
+        if self.client.connected and self.client.shared_keys:
+            self.client.send_typing_status(True)
+            
+            # Cancel previous timer
+            if self.typing_timer:
+                self.typing_timer.cancel()
+            
+            # Set timer to stop typing indicator after 2 seconds of inactivity
+            self.typing_timer = threading.Timer(2.0, lambda: self.client.send_typing_status(False))
+            self.typing_timer.daemon = True
+            self.typing_timer.start()
+    
+    def update_typing_indicator(self):
+        """Update the typing indicator label"""
+        if not self.typing_users:
+            self.typing_label.config(text="")
+        elif len(self.typing_users) == 1:
+            user = list(self.typing_users)[0]
+            self.typing_label.config(text=f"{user} is typing...")
+        elif len(self.typing_users) == 2:
+            users = list(self.typing_users)
+            self.typing_label.config(text=f"{users[0]} and {users[1]} are typing...")
+        else:
+            self.typing_label.config(text="Several people are typing...")
+    
     def send_message(self):
         """Send message from entry field"""
         message = self.message_entry.get()
         if message.strip() and self.client.connected:
+            # Stop typing indicator when sending
+            if self.typing_timer:
+                self.typing_timer.cancel()
+                self.typing_timer = None
+            self.client.send_typing_status(False)
+            
             self.client.send_message(message)
             self.message_entry.delete(0, tk.END)
         elif not self.client.connected:
