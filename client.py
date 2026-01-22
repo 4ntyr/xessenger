@@ -609,6 +609,15 @@ class CommunicationClient:
         
         return nickname
     
+    def log_error(self, message, exception=None):
+        """Log error message with optional exception details"""
+        error_text = f"[ERROR] {message}"
+        if exception:
+            error_text += f": {str(exception)}"
+        print(error_text)
+        if self.gui:
+            self.gui.display_message(error_text, "ERROR")
+    
     def sanitize_message(self, message):
         """Sanitize message text before sending"""
         if not isinstance(message, str):
@@ -849,8 +858,7 @@ class CommunicationClient:
                 "file_id": file_id,
                 "filename": filename,
                 "filesize": filesize,
-                "total_chunks": total_chunks,
-                "encrypted_for": list(self.shared_keys.keys())
+                "total_chunks": total_chunks
             }
             self.socket.send((json.dumps(start_packet) + "\n").encode('utf-8'))
             
@@ -866,8 +874,7 @@ class CommunicationClient:
                                 cancel_packet = {
                                     "type": "FILE_CANCEL",
                                     "from": self.nickname,
-                                    "file_id": file_id,
-                                    "encrypted_for": list(self.shared_keys.keys())
+                                    "file_id": file_id
                                 }
                                 self.socket.send((json.dumps(cancel_packet) + "\n").encode('utf-8'))
                                 if self.gui:
@@ -914,8 +921,7 @@ class CommunicationClient:
                     end_packet = {
                         "type": "FILE_END",
                         "from": self.nickname,
-                        "file_id": file_id,
-                        "encrypted_for": list(self.shared_keys.keys())
+                        "file_id": file_id
                     }
                     self.socket.send((json.dumps(end_packet) + "\n").encode('utf-8'))
                     
@@ -1312,6 +1318,35 @@ class CommunicationClient:
         
         if sender == self.nickname:
             return
+        
+        # Ask user if they want to accept the file
+        if self.gui:
+            accept = messagebox.askyesno(
+                "Incoming File",
+                f"{sender} wants to send you a file:\n\n"
+                f"Filename: {filename}\n"
+                f"Size: {filesize:,} bytes ({filesize / 1024 / 1024:.2f} MB)\n\n"
+                f"Do you want to accept this file?",
+                icon='question'
+            )
+            
+            if not accept:
+                # User declined - send cancel packet back
+                cancel_packet = {
+                    "type": "FILE_CANCEL",
+                    "file_id": file_id,
+                    "from": self.nickname
+                }
+                try:
+                    self.socket.send((json.dumps(cancel_packet) + "\n").encode('utf-8'))
+                except Exception as e:
+                    self.log_error("Error sending file cancel packet", e)
+                
+                self.gui.display_message(
+                    f"📥 Declined file from {sender}: {filename}",
+                    "SYSTEM"
+                )
+                return
             
         # Initialize file transfer tracking
         self.active_file_transfers[file_id] = {
@@ -1491,14 +1526,17 @@ class ChatGUI:
         self.typing_users = set()  # Set of users currently typing
         self.typing_timer = None  # Timer to stop sending typing status
         self.color_palette = [
-            "#FF6B6B", "#4ECDC4", "#45B7D1", "#FFA07A", "#98D8C8",
-            "#F7DC6F", "#BB8FCE", "#85C1E2", "#F8B739", "#52B788",
-            "#FFD93D", "#6BCF7F", "#C490E4", "#F4A460", "#87CEEB"
+            "#FF4444", "#44FF44", "#4444FF", "#FFAA00", "#FF00FF",
+            "#00FFFF", "#FF8800", "#88FF00", "#0088FF", "#FF0088",
+            "#FFD700", "#00FF88", "#8800FF", "#FF6B9D", "#00CED1"
         ]
         self.next_color_index = 0
         self.window_focused = True  # Track if window has focus
         self.gif_animations = {}  # Store animation data for GIFs: msg_id -> {frames, labels, current_frame, delay}
         self.max_active_gifs = 20  # Limit active GIF animations to prevent memory leak
+        self.gif_cache = {}  # url -> {frames, duration} for GIF caching
+        self.gif_preview_cache = {}  # url -> PhotoImage for preview caching
+        self.max_cache_size = 50  # Maximum number of cached GIFs
         self.message_reactions = {}  # msg_id -> {emoji -> [list of users]}
         self.reaction_labels = {}  # msg_id -> tk.Label for displaying reactions
         self.available_reactions = ['👍', '❤️', '😂', '😮', '😢', '🙏']  # Available reaction emojis
@@ -1526,7 +1564,7 @@ class ChatGUI:
             command=self.show_security_info,
             bg='#444444',
             fg='white',
-            font=('Arial', 9),
+            font=('Segoe UI Emoji', 9),
             relief=tk.FLAT,
             cursor='hand2',
             padx=10,
@@ -1540,7 +1578,7 @@ class ChatGUI:
             command=self.clear_chat,
             bg='#444444',
             fg='white',
-            font=('Arial', 9),
+            font=('Segoe UI Emoji', 9),
             relief=tk.FLAT,
             cursor='hand2',
             padx=10,
@@ -1562,6 +1600,12 @@ class ChatGUI:
             pady=10
         )
         self.chat_display.pack(fill=tk.BOTH, expand=True)
+        
+        # Configure emoji tag for better emoji rendering
+        try:
+            self.chat_display.tag_config("emoji", font=('Segoe UI Emoji', 10))
+        except:
+            pass  # Fallback if font not available
         
         # Typing indicator
         self.typing_label = tk.Label(
@@ -1639,7 +1683,7 @@ class ChatGUI:
             command=self.open_gif_search,
             bg='#9C27B0',
             fg='white',
-            font=('Arial', 10, 'bold'),
+            font=('Segoe UI Emoji', 10, 'bold'),
             relief=tk.FLAT,
             cursor='hand2',
             padx=15,
@@ -1654,7 +1698,7 @@ class ChatGUI:
             command=self.send_file_dialog,
             bg='#FF5722',
             fg='white',
-            font=('Arial', 10, 'bold'),
+            font=('Segoe UI Emoji', 10, 'bold'),
             relief=tk.FLAT,
             cursor='hand2',
             padx=15,
@@ -1905,9 +1949,10 @@ class ChatGUI:
             # Add separator
             context_menu.add_separator()
             
-            # Add reaction submenu
+            # Add reaction submenu with emoji font
             reaction_menu = tk.Menu(context_menu, tearoff=0, bg='#2b2b2b', fg='white',
-                                   activebackground='#4CAF50', activeforeground='white')
+                                   activebackground='#4CAF50', activeforeground='white',
+                                   font=('Segoe UI Emoji', 12))
             for emoji in self.available_reactions:
                 reaction_menu.add_command(label=emoji,
                                          command=lambda e=emoji: self.send_reaction(clicked_msg_id, e))
@@ -1945,10 +1990,10 @@ class ChatGUI:
             return
         
         msg_data = self.message_data[msg_id]
-        recipient = msg_data['sender']
+        sender = msg_data['sender']
         
         # Don't send reactions to system messages
-        if recipient in ['SYSTEM', 'ERROR', 'YOU']:
+        if sender in ['SYSTEM', 'ERROR']:
             return
         
         # Create reaction packet
@@ -1958,7 +2003,9 @@ class ChatGUI:
             'reactor': self.client.nickname
         }
         
-        self.client.send_reaction(recipient, reaction_data)
+        # Send reaction to all connected users (broadcast)
+        for peer_nickname in self.client.shared_keys.keys():
+            self.client.send_reaction(peer_nickname, reaction_data)
         
         # Update local reactions display
         self.add_reaction_to_display(msg_id, emoji, self.client.nickname)
@@ -1984,11 +2031,14 @@ class ChatGUI:
     
     def update_reaction_label(self, msg_id):
         """Update the reaction label for a message"""
-        if msg_id not in self.message_marks:
+        if msg_id not in self.message_marks or msg_id not in self.message_data:
             return
         
         try:
             start_mark, end_mark = self.message_marks[msg_id]
+            msg_data = self.message_data[msg_id]
+            sender = msg_data['sender']
+            message_text = msg_data['text']
             
             # Build reaction text
             reaction_text = ""
@@ -2005,54 +2055,49 @@ class ChatGUI:
             # Update display
             self.chat_display.configure(state=tk.NORMAL)
             
-            # Get the line containing this message
+            # Find the main message line (not timestamp or reply lines)
             line_start = self.chat_display.search("\n", start_mark, backwards=True)
             if not line_start:
                 line_start = start_mark
             else:
                 line_start = f"{line_start}+1c"
             
-            line_end = self.chat_display.search("\n", start_mark, end_mark)
-            if not line_end:
-                line_end = end_mark
+            # Search for the line that contains the actual message text
+            # It will have the format: [timestamp] [sender]: message
+            current_pos = line_start
+            message_line_start = None
             
-            # Get current line content
-            current_line = self.chat_display.get(line_start, line_end)
-            
-            # Remove any existing reactions (emojis at the end of the line)
-            # Look for common reaction emojis
-            for emoji in ['??', '??', '??', '??', '??', '??']:
-                if emoji in current_line:
-                    # Find last occurrence of message text before reactions
-                    parts = current_line.split(']:', 1)
-                    if len(parts) == 2:
-                        # Reconstruct without reactions
-                        base_text = parts[0] + ']:'
-                        msg_text = parts[1]
-                        # Remove emoji patterns from end
-                        for e in ['??', '??', '??', '??', '??', '??']:
-                            while msg_text.rstrip().endswith(e) or any(msg_text.rstrip().endswith(f"{e}{i}") for i in range(2, 10)):
-                                msg_text = msg_text.rstrip()
-                                if msg_text.endswith(e):
-                                    msg_text = msg_text[:-len(e)]
-                                else:
-                                    # Remove number suffix
-                                    for i in range(9, 1, -1):
-                                        if msg_text.endswith(f"{e}{i}"):
-                                            msg_text = msg_text[:-len(f"{e}{i}")]
-                                            break
-                        current_line = base_text + msg_text.rstrip()
+            while self.chat_display.compare(current_pos, "<", end_mark):
+                line_content = self.chat_display.get(current_pos, f"{current_pos} lineend")
+                # Look for the line with the sender's name and message
+                if f"[{sender}]:" in line_content or (sender == "YOU" and "[YOU]" in line_content):
+                    message_line_start = current_pos
                     break
+                current_pos = f"{current_pos} +1 line"
             
-            # Add new reactions if any
-            new_line = current_line + reaction_text
+            if not message_line_start:
+                self.chat_display.configure(state=tk.DISABLED)
+                return
             
-            # Replace the line
-            self.chat_display.delete(line_start, line_end)
-            self.chat_display.insert(line_start, new_line)
+            message_line_end = self.chat_display.index(f"{message_line_start} lineend")
             
-            # Update marks
-            new_end = self.chat_display.index(f"{line_start}+{len(new_line)}c")
+            # Delete the message line
+            self.chat_display.delete(message_line_start, message_line_end)
+            
+            # Re-insert with proper formatting and tags
+            timestamp = msg_data.get('timestamp', self.get_timestamp())
+            self.chat_display.insert(message_line_start, f"[{timestamp}] ", "timestamp")
+            
+            if sender == "YOU":
+                self.chat_display.insert(f"{message_line_start} lineend", "[YOU] ", "YOU")
+                self.chat_display.insert(f"{message_line_start} lineend", message_text + reaction_text)
+            else:
+                user_tag = self.get_user_color(sender)
+                self.chat_display.insert(f"{message_line_start} lineend", f"[{sender}]", user_tag)
+                self.chat_display.insert(f"{message_line_start} lineend", f": {message_text}{reaction_text}")
+            
+            # Update end mark
+            new_end = self.chat_display.index(f"{message_line_start} lineend")
             self.message_marks[msg_id] = (start_mark, new_end)
             
             self.chat_display.configure(state=tk.DISABLED)
@@ -2279,16 +2324,19 @@ class ChatGUI:
                 gif_label.image = frames[0]  # Keep reference
             
         except Exception as e:
-            # If GIF fails to load, show link instead
+            # If GIF fails to load, show link instead with error message
+            self.client.log_error(f"Failed to display GIF from {sender}", e)
             if sender == "YOU":
                 self.chat_display.insert(tk.END, f"[{timestamp}] ", "timestamp")
                 self.chat_display.insert(tk.END, "[YOU] ", "YOU")
                 self.chat_display.insert(tk.END, f"GIF: {gif_url}\n")
+                self.chat_display.insert(tk.END, f"(Failed to load: {str(e)})\n", "ERROR")
             else:
                 user_tag = self.get_user_color(sender)
                 self.chat_display.insert(tk.END, f"[{timestamp}] ", "timestamp")
                 self.chat_display.insert(tk.END, f"[{sender}] ", user_tag)
                 self.chat_display.insert(tk.END, f"GIF: {gif_url}\n")
+                self.chat_display.insert(tk.END, f"(Failed to load: {str(e)})\n", "ERROR")
         
         # Mark end position and store if msg_id provided
         if msg_id:
@@ -2598,7 +2646,16 @@ class ChatGUI:
                 self.typing_timer = None
             self.client.send_typing_status(False)
             
-            self.client.send_message(message)
+            # Auto-detect GIF URLs and send as GIF instead of text
+            message_stripped = message.strip()
+            if (message_stripped.startswith('http://') or message_stripped.startswith('https://')) and \
+               ('.gif' in message_stripped.lower() or 'tenor.com' in message_stripped.lower() or 'giphy.com' in message_stripped.lower()):
+                # This looks like a GIF URL - send as GIF
+                self.client.send_gif(message_stripped)
+            else:
+                # Regular text message
+                self.client.send_message(message)
+            
             self.message_entry.delete(0, tk.END)
         elif not self.client.connected:
             messagebox.showwarning("Not Connected", "You are not connected to the server!")
