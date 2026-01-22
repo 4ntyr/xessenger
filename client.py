@@ -641,7 +641,7 @@ class CommunicationClient:
             if not self.connected:
                 return
             
-            # Securely delete old keys
+            # Securely delete old shared keys
             for nickname in list(self.shared_keys.keys()):
                 # Overwrite key data before deletion
                 if nickname in self.shared_keys:
@@ -651,12 +651,24 @@ class CommunicationClient:
                         import ctypes
                         ctypes.memset(id(old_key), 0, len(old_key))
             
-            # Clear old keys
+            # Clear old shared keys (but keep peer public keys)
             self.shared_keys.clear()
-            self.peer_public_keys.clear()
             
             # Generate new DH keys
             self.generate_dh_keys()
+            
+            # Regenerate shared keys with all existing peers using our new private key
+            for peer_nickname, peer_public_key in list(self.peer_public_keys.items()):
+                try:
+                    shared_key = self.derive_shared_key(
+                        peer_public_key.public_bytes(
+                            encoding=serialization.Encoding.PEM,
+                            format=serialization.PublicFormat.SubjectPublicKeyInfo
+                        )
+                    )
+                    self.shared_keys[peer_nickname] = shared_key
+                except Exception as e:
+                    self.log_error(f"Failed to regenerate shared key with {peer_nickname}", e)
             
             # Broadcast new public key
             public_key_pem = self.serialize_public_key().decode('utf-8')
@@ -1742,7 +1754,7 @@ class ChatGUI:
         
         # Configure emoji tag for better emoji rendering
         try:
-            self.chat_display.tag_config("emoji", font=('Segoe UI Emoji', 10))
+            self.chat_display.tag_config("emoji", font=('Segoe UI Emoji', 12))
         except:
             pass  # Fallback if font not available
         
@@ -1918,6 +1930,52 @@ class ChatGUI:
             self.chat_display.tag_config(f"user_{username}", foreground=color)
         return f"user_{username}"
     
+    def insert_text_with_emoji_tags(self, text, base_tag=None):
+        """Insert text with proper emoji font tags applied"""
+        import re
+        # Unicode emoji pattern (covers most common emojis)
+        emoji_pattern = re.compile(
+            "["
+            "\U0001F600-\U0001F64F"  # emoticons
+            "\U0001F300-\U0001F5FF"  # symbols & pictographs
+            "\U0001F680-\U0001F6FF"  # transport & map symbols
+            "\U0001F1E0-\U0001F1FF"  # flags (iOS)
+            "\U00002702-\U000027B0"
+            "\U000024C2-\U0001F251"
+            "\U0001F900-\U0001F9FF"  # supplemental symbols and pictographs
+            "\U0001FA00-\U0001FA6F"  # extended pictographs
+            "\U00002600-\U000026FF"  # miscellaneous symbols
+            "\U00002700-\U000027BF"  # dingbats
+            "]+", flags=re.UNICODE
+        )
+        
+        last_end = 0
+        for match in emoji_pattern.finditer(text):
+            # Insert text before emoji
+            if match.start() > last_end:
+                before_text = text[last_end:match.start()]
+                if base_tag:
+                    self.chat_display.insert(tk.END, before_text, base_tag)
+                else:
+                    self.chat_display.insert(tk.END, before_text)
+            
+            # Insert emoji with emoji tag
+            emoji_text = match.group()
+            if base_tag:
+                self.chat_display.insert(tk.END, emoji_text, (base_tag, "emoji"))
+            else:
+                self.chat_display.insert(tk.END, emoji_text, "emoji")
+            
+            last_end = match.end()
+        
+        # Insert remaining text after last emoji
+        if last_end < len(text):
+            remaining = text[last_end:]
+            if base_tag:
+                self.chat_display.insert(tk.END, remaining, base_tag)
+            else:
+                self.chat_display.insert(tk.END, remaining)
+    
     def display_message(self, message, tag="RECEIVED", msg_id=None, reply_to=None):
         """Display a message in the chat window"""
         self.chat_display.configure(state=tk.NORMAL)
@@ -1946,7 +2004,7 @@ class ChatGUI:
             
             self.chat_display.insert(tk.END, f"[{timestamp}] ", "timestamp")
             self.chat_display.insert(tk.END, "[YOU] ", tag)
-            self.chat_display.insert(tk.END, f"{message}\n")
+            self.insert_text_with_emoji_tags(f"{message}\n")
         elif tag == "RECEIVED":
             # Parse username from message format "[username]: message"
             if message.startswith("[") and "]:" in message:
@@ -1975,7 +2033,7 @@ class ChatGUI:
                 
                 self.chat_display.insert(tk.END, f"[{timestamp}] ", "timestamp")
                 self.chat_display.insert(tk.END, f"[{username}]", user_tag)
-                self.chat_display.insert(tk.END, f": {message_text}\n")
+                self.insert_text_with_emoji_tags(f": {message_text}\n")
             else:
                 # Fallback for messages without username format
                 self.chat_display.insert(tk.END, f"[{timestamp}] ", "timestamp")
@@ -2229,11 +2287,11 @@ class ChatGUI:
             
             if sender == "YOU":
                 self.chat_display.insert(f"{message_line_start} lineend", "[YOU] ", "YOU")
-                self.chat_display.insert(f"{message_line_start} lineend", message_text + reaction_text)
+                self.insert_text_with_emoji_tags(message_text + reaction_text)
             else:
                 user_tag = self.get_user_color(sender)
                 self.chat_display.insert(f"{message_line_start} lineend", f"[{sender}]", user_tag)
-                self.chat_display.insert(f"{message_line_start} lineend", f": {message_text}{reaction_text}")
+                self.insert_text_with_emoji_tags(f": {message_text}{reaction_text}")
             
             # Update end mark
             new_end = self.chat_display.index(f"{message_line_start} lineend")
