@@ -141,38 +141,45 @@ echo Installing required packages...
 echo.
 
 REM Install packages one by one with error checking
-echo [1/5] Installing cryptography...
+echo [1/6] Installing cryptography...
 call "!PYTHON_CMD!" -m pip install --upgrade cryptography
 if errorlevel 1 (
     echo WARNING: Failed to install cryptography
 )
 
 echo.
-echo [2/5] Installing winotify...
+echo [2/6] Installing bcrypt...
+call "!PYTHON_CMD!" -m pip install --upgrade bcrypt
+if errorlevel 1 (
+    echo WARNING: Failed to install bcrypt
+)
+
+echo.
+echo [3/6] Installing winotify...
 call "!PYTHON_CMD!" -m pip install --upgrade winotify
 if errorlevel 1 (
     echo WARNING: Failed to install winotify
 )
 
 echo.
-echo [3/5] Installing tzdata...
-call "!PYTHON_CMD!" -m pip install --upgrade tzdata
-if errorlevel 1 (
-    echo WARNING: Failed to install tzdata
-)
-
-echo.
-echo [4/5] Installing requests...
+echo [4/6] Installing requests...
 call "!PYTHON_CMD!" -m pip install --upgrade requests
 if errorlevel 1 (
     echo WARNING: Failed to install requests
 )
 
 echo.
-echo [5/5] Installing Pillow...
+echo [5/6] Installing Pillow...
 call "!PYTHON_CMD!" -m pip install --upgrade Pillow
 if errorlevel 1 (
     echo WARNING: Failed to install Pillow
+)
+
+echo.
+echo [6/6] Installing tzdata...
+call "!PYTHON_CMD!" -m pip install --upgrade tzdata
+if errorlevel 1 (
+    echo WARNING: Failed to install tzdata
 )
 
 echo.
