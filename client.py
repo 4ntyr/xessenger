@@ -451,6 +451,7 @@ class ChatGUI:
         ]
         self.next_color_index = 0
         self.window_focused = True  # Track if window has focus
+        self.gif_animations = {}  # Store animation data for GIFs: msg_id -> {frames, labels, current_frame, delay}
         
         self.window = tk.Tk()
         self.window.title(f"Xessenger - {self.client.nickname}")
@@ -722,6 +723,7 @@ class ChatGUI:
         self.chat_display.configure(state=tk.DISABLED)
         self.message_marks.clear()
         self.message_data.clear()
+        self.gif_animations.clear()
         self.cancel_reply()
         self.display_message("Chat cleared", "SYSTEM")
     
@@ -743,6 +745,8 @@ class ChatGUI:
             del self.message_marks[msg_id]
             if msg_id in self.message_data:
                 del self.message_data[msg_id]
+            if msg_id in self.gif_animations:
+                del self.gif_animations[msg_id]
     
     def show_context_menu(self, event):
         """Show context menu for replying to messages"""
@@ -813,12 +817,27 @@ class ChatGUI:
             img_data = BytesIO(response.content)
             img = Image.open(img_data)
             
-            # Resize if too large
+            # Get original size and calculate resize factor
             max_width = 200
             max_height = 150
-            img.thumbnail((max_width, max_height), Image.Resampling.LANCZOS)
             
-            photo = ImageTk.PhotoImage(img)
+            # Extract all frames
+            frames = []
+            try:
+                while True:
+                    # Copy and resize frame
+                    frame = img.copy()
+                    frame.thumbnail((max_width, max_height), Image.Resampling.LANCZOS)
+                    frames.append(ImageTk.PhotoImage(frame))
+                    img.seek(img.tell() + 1)
+            except EOFError:
+                pass  # End of frames
+            
+            # Get frame duration (delay between frames in milliseconds)
+            try:
+                duration = img.info.get('duration', 100)  # Default 100ms
+            except:
+                duration = 100
             
             # Insert header
             if sender == "YOU":
@@ -838,14 +857,25 @@ class ChatGUI:
                 else:
                     self.chat_display.insert(tk.END, "\n")
             
-            # Insert the image
-            self.chat_display.image_create(tk.END, image=photo)
+            # Create a label for the animated GIF
+            gif_label = tk.Label(self.chat_display, bg='#1e1e1e')
+            self.chat_display.window_create(tk.END, window=gif_label)
             self.chat_display.insert(tk.END, "\n")
             
-            # Keep a reference to prevent garbage collection
-            if not hasattr(self, 'gif_images'):
-                self.gif_images = []
-            self.gif_images.append(photo)
+            # Store animation data
+            if msg_id and len(frames) > 1:
+                self.gif_animations[msg_id] = {
+                    'frames': frames,
+                    'label': gif_label,
+                    'current_frame': 0,
+                    'delay': duration
+                }
+                # Start animation
+                self.animate_gif(msg_id)
+            elif frames:
+                # Single frame, just display it
+                gif_label.config(image=frames[0])
+                gif_label.image = frames[0]  # Keep reference
             
         except Exception as e:
             # If GIF fails to load, show link instead
@@ -866,6 +896,32 @@ class ChatGUI:
         
         self.chat_display.configure(state=tk.DISABLED)
         self.chat_display.see(tk.END)
+    
+    def animate_gif(self, msg_id):
+        """Animate a GIF by cycling through its frames"""
+        if msg_id not in self.gif_animations:
+            return
+        
+        anim_data = self.gif_animations[msg_id]
+        frames = anim_data['frames']
+        label = anim_data['label']
+        current_frame = anim_data['current_frame']
+        
+        # Update the label with the current frame
+        try:
+            label.config(image=frames[current_frame])
+            label.image = frames[current_frame]  # Keep reference
+        except:
+            # Label might have been destroyed
+            if msg_id in self.gif_animations:
+                del self.gif_animations[msg_id]
+            return
+        
+        # Move to next frame
+        anim_data['current_frame'] = (current_frame + 1) % len(frames)
+        
+        # Schedule next frame update
+        self.window.after(anim_data['delay'], lambda: self.animate_gif(msg_id))
     
     def open_gif_search(self):
         """Open a GIF search dialog"""
