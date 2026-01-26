@@ -1,6 +1,21 @@
 """
-Simple PC-to-PC Communication Client
-GUI Application with Encryption
+╔══════════════════════════════════════════════════════════════╗
+║                    🔐 XESSENGER CLIENT                      ║
+║                                                              ║
+║  Secure End-to-End Encrypted Messaging Application          ║
+║  Version 1.0 - 2026                                          ║
+║                                                              ║
+║  Features:                                                   ║
+║  • End-to-End Encryption (Diffie-Hellman + Fernet)         ║
+║  • GIF Support via Tenor API                                 ║
+║  • File Transfer (Encrypted)                                 ║
+║  • Message Reactions & Reply Threading                       ║
+║  • Windows Notifications                                     ║
+║  • Security Fingerprint Verification                         ║
+║                                                              ║
+║  Usage: python client.py                                     ║
+║                                                              ║
+╚══════════════════════════════════════════════════════════════╝
 """
 
 import socket
@@ -94,11 +109,6 @@ class CommunicationClient:
         self.verify_cert = False  # Set to True for production with valid certificates
         self.key_change_history = {}  # nickname -> [timestamps] for suspicious activity detection
         self.pending_auto_trust = {}  # nickname -> Timer for auto-trust
-        
-        # Perfect Forward Secrecy (PFS)
-        self.key_rotation_interval = 600  # Rotate keys every 10 minutes (600 seconds)
-        self.key_rotation_timer = None  # Timer for automatic key rotation
-        self.last_key_rotation = time.time()  # Track last rotation time
         
         # File transfer tracking
         self.active_file_transfers = {}  # file_id -> {filename, filesize, chunks, received_chunks, sender}
@@ -329,9 +339,6 @@ class CommunicationClient:
             receive_thread.daemon = True
             receive_thread.start()
             
-            # Start Perfect Forward Secrecy key rotation
-            self.start_key_rotation()
-            
         except ConnectionRefusedError as e:
             error_msg = f"Could not connect to {self.host}:{self.port}"
             if self.gui:
@@ -547,26 +554,27 @@ class CommunicationClient:
         if msg_id in self.message_timers:
             del self.message_timers[msg_id]
     
-    def send_reaction(self, recipient, reaction_data):
-        """Send a reaction to a message"""
+    def send_reaction(self, reaction_data):
+        """Send a reaction to a message (broadcast to all users)"""
         try:
             if not self.connected:
                 return
             
-            if recipient not in self.shared_keys:
+            # Encrypt reaction data for each connected peer
+            encrypted_reactions = {}
+            for peer_nickname, shared_key in self.shared_keys.items():
+                cipher = Fernet(shared_key)
+                reaction_json = json.dumps(reaction_data)
+                encrypted_reactions[peer_nickname] = cipher.encrypt(reaction_json.encode('utf-8')).decode('utf-8')
+            
+            if not encrypted_reactions:
                 return
             
-            # Encrypt reaction data
-            cipher = Fernet(self.shared_keys[recipient])
-            reaction_json = json.dumps(reaction_data)
-            encrypted_reaction = cipher.encrypt(reaction_json.encode('utf-8')).decode('utf-8')
-            
-            # Prepare packet
+            # Prepare packet (broadcast like messages)
             reaction_packet = {
                 "type": "REACTION",
                 "from": self.nickname,
-                "to": recipient,
-                "encrypted_reaction": encrypted_reaction,
+                "encrypted_reactions": encrypted_reactions,
                 "nonce": str(uuid.uuid4()),
                 "timestamp": time.time()
             }
@@ -616,91 +624,6 @@ class CommunicationClient:
             return None
         
         return nickname
-    
-    def start_key_rotation(self):
-        """Start automatic key rotation timer for Perfect Forward Secrecy"""
-        if self.key_rotation_timer:
-            self.key_rotation_timer.cancel()
-        
-        self.key_rotation_timer = threading.Timer(
-            self.key_rotation_interval,
-            self.rotate_keys
-        )
-        self.key_rotation_timer.daemon = True
-        self.key_rotation_timer.start()
-        
-        if self.gui:
-            self.gui.display_message(
-                f"Perfect Forward Secrecy enabled: Keys will rotate every {self.key_rotation_interval // 60} minutes",
-                "SYSTEM"
-            )
-    
-    def rotate_keys(self):
-        """Rotate encryption keys for Perfect Forward Secrecy"""
-        try:
-            if not self.connected:
-                return
-            
-            # Securely delete old shared keys
-            for nickname in list(self.shared_keys.keys()):
-                # Overwrite key data before deletion
-                if nickname in self.shared_keys:
-                    old_key = self.shared_keys[nickname]
-                    # Overwrite with zeros (secure deletion)
-                    if isinstance(old_key, bytes):
-                        import ctypes
-                        ctypes.memset(id(old_key), 0, len(old_key))
-            
-            # Clear old shared keys (but keep peer public keys)
-            self.shared_keys.clear()
-            
-            # Generate new DH keys
-            self.generate_dh_keys()
-            
-            # Regenerate shared keys with all existing peers using our new private key
-            for peer_nickname, peer_public_key in list(self.peer_public_keys.items()):
-                try:
-                    shared_key = self.derive_shared_key(
-                        peer_public_key.public_bytes(
-                            encoding=serialization.Encoding.PEM,
-                            format=serialization.PublicFormat.SubjectPublicKeyInfo
-                        )
-                    )
-                    self.shared_keys[peer_nickname] = shared_key
-                except Exception as e:
-                    self.log_error(f"Failed to regenerate shared key with {peer_nickname}", e)
-            
-            # Broadcast new public key
-            public_key_pem = self.serialize_public_key().decode('utf-8')
-            fingerprint = self.generate_fingerprint(self.serialize_public_key())
-            
-            key_packet = json.dumps({
-                "type": "KEY_ROTATION",
-                "nickname": self.nickname,
-                "public_key": public_key_pem,
-                "fingerprint": fingerprint,
-                "timestamp": time.time()
-            })
-            self.socket.send((key_packet + "\n").encode('utf-8'))
-            
-            self.last_key_rotation = time.time()
-            
-            if self.gui:
-                self.gui.display_message(
-                    "🔄 Encryption keys rotated (Perfect Forward Secrecy)",
-                    "SYSTEM"
-                )
-            
-            # Schedule next rotation
-            self.start_key_rotation()
-            
-        except Exception as e:
-            self.log_error("Key rotation failed", e)
-            # Retry rotation in 1 minute if it fails
-            if self.connected:
-                self.key_rotation_timer = threading.Timer(60, self.rotate_keys)
-                self.key_rotation_timer.daemon = True
-                self.key_rotation_timer.start()
     
     def log_error(self, message, exception=None):
         """Log error message with optional exception details"""
@@ -1150,8 +1073,6 @@ class CommunicationClient:
             # Route to specific handler methods
             if packet_type == "PUBKEY":
                 self._handle_pubkey_packet(packet)
-            elif packet_type == "KEY_ROTATION":
-                self._handle_key_rotation_packet(packet)
             elif packet_type in ("MSG", "DESTRUCT_MSG"):
                 self._handle_message_packet(packet)
             elif packet_type in ("GIF_MSG", "DESTRUCT_GIF_MSG"):
@@ -1291,55 +1212,6 @@ class CommunicationClient:
                 f"? First contact with {peer_nickname} - key automatically trusted (TOFU)",
                 "SYSTEM"
             )
-    
-    def _handle_key_rotation_packet(self, packet: Dict[str, Any]) -> None:
-        """Handle key rotation from a peer (Perfect Forward Secrecy)"""
-        peer_nickname = packet.get("nickname")
-        public_key_pem = packet.get("public_key")
-        new_fingerprint = packet.get("fingerprint")
-        
-        if not peer_nickname or peer_nickname == self.nickname:
-            return
-        
-        try:
-            # Securely delete old shared key if exists
-            if peer_nickname in self.shared_keys:
-                old_key = self.shared_keys[peer_nickname]
-                # Overwrite with zeros before deletion
-                if isinstance(old_key, bytes):
-                    import ctypes
-                    ctypes.memset(id(old_key), 0, len(old_key))
-                del self.shared_keys[peer_nickname]
-            
-            # Load new public key
-            peer_public_key = serialization.load_pem_public_key(
-                public_key_pem.encode('utf-8')
-            )
-            
-            # Store new public key
-            self.peer_public_keys[peer_nickname] = peer_public_key
-            
-            # Derive new shared key
-            shared_key = self.derive_shared_key(
-                peer_public_key.public_bytes(
-                    encoding=serialization.Encoding.PEM,
-                    format=serialization.PublicFormat.SubjectPublicKeyInfo
-                )
-            )
-            self.shared_keys[peer_nickname] = shared_key
-            
-            # Update fingerprint
-            old_fingerprint = self.peer_fingerprints.get(peer_nickname)
-            self.peer_fingerprints[peer_nickname] = new_fingerprint
-            
-            if self.gui:
-                self.gui.display_message(
-                    f"🔄 {peer_nickname} rotated encryption keys (PFS)",
-                    "SYSTEM"
-                )
-        
-        except Exception as e:
-            self.log_error(f"Failed to process key rotation from {peer_nickname}", e)
     
     def _handle_message_packet(self, packet: Dict[str, Any]) -> None:
         """Handle encrypted text message packet."""
@@ -1616,12 +1488,17 @@ class CommunicationClient:
     def _handle_reaction_packet(self, packet: Dict[str, Any]) -> None:
         """Handle message reaction packet."""
         sender = packet.get("from")
-        encrypted_reaction = packet.get("encrypted_reaction")
+        encrypted_reactions = packet.get("encrypted_reactions", {})
         
+        # Find our encrypted reaction
+        if self.nickname not in encrypted_reactions:
+            return
+            
         if sender not in self.shared_keys:
             return
             
         try:
+            encrypted_reaction = encrypted_reactions[self.nickname]
             cipher = Fernet(self.shared_keys[sender])
             reaction_json = cipher.decrypt(encrypted_reaction.encode('utf-8')).decode('utf-8')
             reaction_data = json.loads(reaction_json)
@@ -1639,13 +1516,6 @@ class CommunicationClient:
     def disconnect(self) -> None:
         """Disconnect from the server"""
         self.connected = False
-        
-        # Cancel key rotation timer
-        if self.key_rotation_timer:
-            try:
-                self.key_rotation_timer.cancel()
-            except Exception as e:
-                self.log_error("Error canceling key rotation timer", e)
         
         # Cancel all pending auto-trust timers to prevent orphaned timers
         for nickname, timer in list(self.pending_auto_trust.items()):
@@ -2201,8 +2071,7 @@ class ChatGUI:
         }
         
         # Send reaction to all connected users (broadcast)
-        for peer_nickname in self.client.shared_keys.keys():
-            self.client.send_reaction(peer_nickname, reaction_data)
+        self.client.send_reaction(reaction_data)
         
         # Update local reactions display
         self.add_reaction_to_display(msg_id, emoji, self.client.nickname)

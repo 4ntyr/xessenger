@@ -140,6 +140,22 @@ if errorlevel 1 (
 echo Installing required packages...
 echo.
 
+REM Check if requirements.txt exists
+if exist "requirements.txt" (
+    echo Using requirements.txt for installation...
+    call "!PYTHON_CMD!" -m pip install --upgrade -r requirements.txt
+    if errorlevel 1 (
+        echo.
+        echo WARNING: Some packages failed to install from requirements.txt
+        echo Attempting individual package installation...
+        echo.
+    ) else (
+        echo.
+        echo All packages installed successfully from requirements.txt!
+        goto INSTALL_COMPLETE
+    )
+)
+
 REM Install packages one by one with error checking
 echo [1/6] Installing cryptography...
 call "!PYTHON_CMD!" -m pip install --upgrade cryptography
@@ -182,17 +198,26 @@ if errorlevel 1 (
     echo WARNING: Failed to install tzdata
 )
 
+:INSTALL_COMPLETE
+
 echo.
 echo ========================================
 echo Setup Complete!
 echo ========================================
 echo.
+echo Next steps:
+echo   1. Run: launch_client.bat (or python client.py)
+echo   2. Enter server address and your nickname
+echo   3. Start chatting!
+echo.
+echo For help, read README.md or QUICKSTART.md
+echo.
 if "!PYTHON_CMD!"=="python" (
-    echo To start the server: python server.py
-    echo To start the client: python client.py
+    echo Server command: python server.py
+    echo Client command: python client.py
 ) else (
-    echo To start the server: "!PYTHON_CMD!" server.py
-    echo To start the client: "!PYTHON_CMD!" client.py
+    echo Server command: "!PYTHON_CMD!" server.py
+    echo Client command: "!PYTHON_CMD!" client.py
 )
 echo.
 pause

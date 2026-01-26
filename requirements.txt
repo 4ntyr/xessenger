@@ -1,0 +1,18 @@
+# Xessenger Client Requirements
+# Install with: pip install -r requirements.txt
+
+# Encryption and Security
+cryptography>=41.0.0
+bcrypt>=4.0.0
+
+# Windows Notifications
+winotify>=1.1.0
+
+# HTTP Requests (for GIF API)
+requests>=2.31.0
+
+# Image Processing (for GIF display)
+Pillow>=10.0.0
+
+# Timezone Support
+tzdata>=2023.3
