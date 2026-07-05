@@ -106,7 +106,7 @@ class CommunicationClient:
         self.peer_public_keys = {}  # nickname -> DH public key
         self.peer_fingerprints = {}  # nickname -> key fingerprint
         self.trusted_keys = {}  # nickname -> fingerprint (manually verified)
-        self.pending_messages = {}  # Messages waiting for key exchange
+        self.pending_messages = []  # Messages waiting for key exchange
         self.message_timers = {}  # msg_id -> threading.Timer for self-destruct
         self.server_password = None  # Server password for authentication
         self.use_websocket = True  # Use WebSocket (wss://) instead of raw TCP — firewall-friendly
@@ -317,9 +317,10 @@ class CommunicationClient:
             scheme = "wss" if self.use_tls else "ws"
             url = f"{scheme}://{self.host}:{self.port}"
 
-            ssl_opts: dict = {}
-            if self.use_tls and not self.verify_cert:
-                ssl_opts = {"cert_reqs": ssl.CERT_NONE}
+            # NOTE: cert_reqs=CERT_NONE disables TLS certificate verification,
+            # matching the existing raw-TCP behaviour for self-signed server certs.
+            # Production deployments with CA-signed certs should set verify_cert=True.
+            ssl_opts = {"cert_reqs": ssl.CERT_NONE} if (self.use_tls and not self.verify_cert) else {}
 
             self.ws = websocket.WebSocketApp(
                 url,
@@ -331,7 +332,7 @@ class CommunicationClient:
 
             ws_thread = threading.Thread(
                 target=self.ws.run_forever,
-                kwargs={"sslopt": ssl_opts} if ssl_opts else {},
+                kwargs={"sslopt": ssl_opts},
                 daemon=True,
             )
             ws_thread.start()
@@ -2935,10 +2936,10 @@ if __name__ == "__main__":
     
     use_websocket = config.get('use_websocket', True)
     
-    def _server_display(h, p, ws):
+    def _server_display(host, port, use_ws):
         """Format server address for display in dialogs."""
-        scheme = "wss" if ws else "tcp"
-        return f"{scheme}://{h}:{p}"
+        scheme = "wss" if use_ws else "tcp"
+        return f"{scheme}://{host}:{port}"
     
     # Get server address (use command line args if provided, otherwise use config)
     if len(sys.argv) > 1:

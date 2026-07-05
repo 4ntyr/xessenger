@@ -107,7 +107,7 @@ Settings are stored in `config.json`:
 
 ```json
 {
-    "server_host": "yourserver.com",
+    "server_host": "localhost",
     "server_port": 443,
     "nickname": "YourName",
     "use_websocket": true
@@ -116,6 +116,9 @@ Settings are stored in `config.json`:
 
 - **`use_websocket`** — `true` (default) uses WebSocket over HTTPS (`wss://`), which passes through firewalls. Set to `false` for legacy raw-TCP mode.
 - **`server_port`** — use `443` for `wss://`, `80` for `ws://`, or any custom port your server listens on.
+
+> **⚠️ Migration note:** the default port changed from `5000` to `443` when WebSocket support was added.  
+> If your server still runs on `5000`, either update the server to listen on `443` (recommended) or set `"server_port": 5000` in `config.json` and `"use_websocket": false`.
 
 You can edit this file manually or use the settings dialog when starting the client.
 
