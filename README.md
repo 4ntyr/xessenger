@@ -5,7 +5,7 @@ A secure, end-to-end encrypted messaging application for Windows with modern fea
 ## ✨ Features
 
 - 🔒 **End-to-End Encryption** - All messages encrypted with Diffie-Hellman key exchange + Fernet symmetric encryption
-- 🌐 **WebSocket/HTTPS Transport** - Runs over `wss://` (port 443) by default — passes through corporate firewalls and HTTP proxies
+- 🌐 **WebSocket/HTTPS Transport** - Runs over `wss://` (port 115) by default — passes through corporate firewalls and HTTP proxies
 - 🎬 **GIF Support** - Search and send GIFs via Tenor integration
 - 📎 **File Transfer** - Send files securely to other users
 - 💬 **Message Reactions** - React to messages with emojis
@@ -44,7 +44,7 @@ A secure, end-to-end encrypted messaging application for Windows with modern fea
 3. **Configure Connection**
    - On first run, you'll be prompted for:
      - Server address (e.g., `localhost` or IP address)
-     - Server port (default: `5000`)
+     - Server port (default: `4489`)
      - Your nickname
      - Server password (if required)
    
@@ -108,23 +108,23 @@ Settings are stored in `config.json`:
 ```json
 {
     "server_host": "localhost",
-    "server_port": 443,
+    "server_port": 115,
     "nickname": "YourName",
     "use_websocket": true
 }
 ```
 
 - **`use_websocket`** — `true` (default) uses WebSocket over HTTPS (`wss://`), which passes through firewalls. Set to `false` for legacy raw-TCP mode.
-- **`server_port`** — use `443` for `wss://`, `80` for `ws://`, or any custom port your server listens on.
+- **`server_port`** — use `115` for `wss://`, `67` for `ws://`, or any custom port your server listens on.
 
-> **⚠️ Migration note:** the default port changed from `5000` to `443` when WebSocket support was added.  
-> If your server still runs on `5000`, either update the server to listen on `443` (recommended) or set `"server_port": 5000` in `config.json` and `"use_websocket": false`.
+> **⚠️ Migration note:** the default port changed from `4489` to `115` when WebSocket support was added.  
+> If your server still runs on `4489`, either update the server to listen on `115` (recommended) or set `"server_port": 4489` in `config.json` and `"use_websocket": false`.
 
 You can edit this file manually or use the settings dialog when starting the client.
 
 ## 🌐 Firewall-Friendly Transport (WebSocket/HTTPS)
 
-By default Xessenger connects over **WebSocket Secure (`wss://`)**, which piggybacks on the standard HTTPS port (443).  The connection starts as a normal HTTP/1.1 `Upgrade` request and is therefore allowed by:
+By default Xessenger connects over **WebSocket Secure (`wss://`)**, which piggybacks on the standard HTTPS port (115).  The connection starts as a normal HTTP/1.1 `Upgrade` request and is therefore allowed by:
 
 - Corporate firewalls that only permit HTTP/HTTPS
 - Deep-packet-inspection proxies
@@ -147,7 +147,7 @@ async def handler(websocket):
         # ... route packet as before, reply with websocket.send(json.dumps(...))
 
 async def main():
-    async with websockets.serve(handler, "0.0.0.0", 443, ssl=ssl_context):
+    async with websockets.serve(handler, "0.0.0.0", 115, ssl=ssl_context):
         await asyncio.Future()  # run forever
 
 asyncio.run(main())

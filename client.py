@@ -50,7 +50,7 @@ def load_config():
     config_file = 'config.json'
     default_config = {
         'server_host': 'localhost',
-        'server_port': 443,
+        'server_port': 115,
         'nickname': 'User',
         'use_websocket': True,
     }
@@ -88,7 +88,7 @@ TENOR_API_KEY = "AIzaSyAyimkuYQYF_FXVALexPuGQctUWRURdCYQ"  # Default key, users 
 TENOR_API_URL = "https://tenor.googleapis.com/v2/search"
 
 class CommunicationClient:
-    def __init__(self, host: str = 'localhost', port: int = 443, nickname: str = 'User') -> None:
+    def __init__(self, host: str = 'localhost', port: int = 115, nickname: str = 'User') -> None:
         self.host = host
         self.port = port
         self.nickname = nickname
@@ -2968,7 +2968,7 @@ if __name__ == "__main__":
             
             port_str = simpledialog.askstring(
                 "Server Port", 
-                "Enter server port (443 for WSS, 80 for WS):", 
+                "Enter server port (115 for WSS, 67 for WS):", 
                 initialvalue=str(config['server_port'])
             )
             port = int(port_str) if port_str else config['server_port']
@@ -2984,7 +2984,7 @@ if __name__ == "__main__":
             ws_answer = messagebox.askyesno(
                 "Transport Protocol",
                 "Use WebSocket (WSS/HTTPS) transport?\n\n"
-                "✅ YES — WebSocket over HTTPS (port 443). Passes through most\n"
+                "✅ YES — WebSocket over HTTPS (port 115). Passes through most\n"
                 "    firewalls and corporate proxies. Recommended.\n\n"
                 "❌ NO  — Raw TCP (legacy mode). May be blocked by firewalls.",
                 default='yes'

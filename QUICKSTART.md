@@ -23,7 +23,7 @@
 2. A dialog will appear asking if you want to change settings
 3. Click "Yes" to configure:
    - **Server Address:** Enter the server IP or hostname (ask server owner)
-   - **Server Port:** Usually `5000` (ask server owner if different)
+   - **Server Port:** Usually `4489` (ask server owner if different)
    - **Nickname:** Choose your display name
 4. Enter server password if prompted (ask server owner)
 5. Click "Connect"
