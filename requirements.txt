@@ -11,6 +11,9 @@ winotify>=1.1.0
 # HTTP Requests (for GIF API)
 requests>=2.31.0
 
+# WebSocket client (replaces raw TCP for firewall-friendly WSS transport)
+websocket-client>=1.8.0
+
 # Image Processing (for GIF display)
 Pillow>=10.0.0
 

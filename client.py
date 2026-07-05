@@ -23,6 +23,7 @@ import threading
 import sys
 import ssl
 import re
+import websocket
 import os
 import tkinter as tk
 from tkinter import scrolledtext, messagebox, simpledialog, Toplevel, Label, Entry, Button, Frame, Canvas, Scrollbar, VERTICAL, HORIZONTAL, filedialog
@@ -49,8 +50,9 @@ def load_config():
     config_file = 'config.json'
     default_config = {
         'server_host': 'localhost',
-        'server_port': 5000,
-        'nickname': 'User'
+        'server_port': 443,
+        'nickname': 'User',
+        'use_websocket': True,
     }
     
     if os.path.exists(config_file):
@@ -64,12 +66,13 @@ def load_config():
             return default_config
     return default_config
 
-def save_config(host, port, nickname):
+def save_config(host, port, nickname, use_websocket=True):
     """Save configuration to config.json."""
     config = {
         'server_host': host,
         'server_port': port,
-        'nickname': nickname
+        'nickname': nickname,
+        'use_websocket': use_websocket,
     }
     
     try:
@@ -85,11 +88,12 @@ TENOR_API_KEY = "AIzaSyAyimkuYQYF_FXVALexPuGQctUWRURdCYQ"  # Default key, users 
 TENOR_API_URL = "https://tenor.googleapis.com/v2/search"
 
 class CommunicationClient:
-    def __init__(self, host: str = 'localhost', port: int = 5000, nickname: str = 'User') -> None:
+    def __init__(self, host: str = 'localhost', port: int = 443, nickname: str = 'User') -> None:
         self.host = host
         self.port = port
         self.nickname = nickname
         self.socket = None
+        self.ws = None  # WebSocket connection (used when use_websocket=True)
         self.connected = False
         self.cipher = None
         self.gui = None
@@ -102,9 +106,10 @@ class CommunicationClient:
         self.peer_public_keys = {}  # nickname -> DH public key
         self.peer_fingerprints = {}  # nickname -> key fingerprint
         self.trusted_keys = {}  # nickname -> fingerprint (manually verified)
-        self.pending_messages = []  # Messages waiting for key exchange
+        self.pending_messages = {}  # Messages waiting for key exchange
         self.message_timers = {}  # msg_id -> threading.Timer for self-destruct
         self.server_password = None  # Server password for authentication
+        self.use_websocket = True  # Use WebSocket (wss://) instead of raw TCP — firewall-friendly
         self.use_tls = True  # Use TLS/SSL for connection
         self.verify_cert = False  # Set to True for production with valid certificates
         self.key_change_history = {}  # nickname -> [timestamps] for suspicious activity detection
@@ -235,9 +240,158 @@ class CommunicationClient:
         
         # Encode as URL-safe base64 for Fernet compatibility
         return base64.urlsafe_b64encode(derived_key)
+    
+    # -------------------------------------------------------------------------
+    # Transport helpers
+    # -------------------------------------------------------------------------
+
+    def _send_packet(self, packet: dict) -> None:
+        """Send a JSON packet via the active connection (WebSocket or raw TCP).
         
+        This is the single, authoritative send path.  All other methods must
+        use this helper so that switching between transport modes (WebSocket vs
+        raw TCP) requires no changes outside of connect / disconnect.
+        
+        WebSocket frames are self-delimiting, so no newline is appended.
+        Raw TCP uses newline-delimited JSON (unchanged from the original protocol).
+        """
+        try:
+            if self.use_websocket and self.ws:
+                self.ws.send(json.dumps(packet))
+            elif self.socket:
+                self.socket.send((json.dumps(packet) + "\n").encode('utf-8'))
+        except Exception as e:
+            if self.gui:
+                self.gui.display_message(f"Error sending packet: {e}", "ERROR")
+
+    def _send_after_auth(self) -> None:
+        """Broadcast our nickname and DH public key after authentication.
+        
+        Called immediately after a successful connection (or after receiving
+        a successful AUTH_RESULT in WebSocket mode).
+        """
+        self._send_packet({"type": "NICK", "nickname": self.nickname})
+        public_key_pem = self.serialize_public_key().decode('utf-8')
+        self._send_packet({
+            "type": "PUBKEY",
+            "nickname": self.nickname,
+            "public_key": public_key_pem,
+        })
+        if self.gui:
+            self.gui.display_message("End-to-end encryption initialized", "SYSTEM")
+
+    # -------------------------------------------------------------------------
+    # WebSocket transport
+    # -------------------------------------------------------------------------
+
+    def _connect_websocket(self) -> None:
+        """Connect to the server via WebSocket (wss:// or ws://).
+        
+        WebSocket starts as a standard HTTP/1.1 Upgrade request, so corporate
+        firewalls that only allow HTTP/HTTPS traffic will pass it through.
+        Once the handshake completes, the connection is a full-duplex channel
+        identical in capability to the previous raw-TCP transport.
+        
+        TLS (wss://) is used by default.  For self-signed server certificates,
+        certificate verification is disabled (matching the previous raw-TCP
+        behaviour); set self.verify_cert = True when using a CA-signed cert.
+        """
+        try:
+            sanitized_nick = self.sanitize_nickname(self.nickname)
+            if not sanitized_nick:
+                if self.gui:
+                    self.gui.display_message(
+                        "Invalid nickname (3-30 characters, alphanumeric only)", "ERROR"
+                    )
+                    messagebox.showerror(
+                        "Invalid Nickname",
+                        "Nickname must be 3-30 characters and contain only letters, "
+                        "numbers, spaces, underscores, or hyphens."
+                    )
+                self.connected = False
+                return
+            self.nickname = sanitized_nick
+
+            self.generate_dh_keys()
+
+            scheme = "wss" if self.use_tls else "ws"
+            url = f"{scheme}://{self.host}:{self.port}"
+
+            ssl_opts: dict = {}
+            if self.use_tls and not self.verify_cert:
+                ssl_opts = {"cert_reqs": ssl.CERT_NONE}
+
+            self.ws = websocket.WebSocketApp(
+                url,
+                on_open=self._on_ws_open,
+                on_message=self._on_ws_message,
+                on_error=self._on_ws_error,
+                on_close=self._on_ws_close,
+            )
+
+            ws_thread = threading.Thread(
+                target=self.ws.run_forever,
+                kwargs={"sslopt": ssl_opts} if ssl_opts else {},
+                daemon=True,
+            )
+            ws_thread.start()
+
+        except Exception as e:
+            error_msg = f"WebSocket connection error: {e}"
+            if self.gui:
+                self.gui.display_message(error_msg, "ERROR")
+                messagebox.showerror("Connection Error", error_msg)
+            self.log_error(error_msg, e)
+            self.connected = False
+
+    def _on_ws_open(self, ws) -> None:
+        """Called by websocket-client when the connection is established."""
+        self.connected = True
+        if self.gui:
+            self.gui.display_message("🔒 WebSocket (WSS) connection established", "SYSTEM")
+        if self.server_password:
+            # Send AUTH first; NICK/PUBKEY are sent after AUTH_RESULT confirms success.
+            self._send_packet({"type": "AUTH", "password": self.server_password})
+        else:
+            self._send_after_auth()
+
+    def _on_ws_message(self, ws, message: str) -> None:
+        """Called by websocket-client for every incoming message frame."""
+        try:
+            packet = json.loads(message)
+            self.handle_packet(packet)
+        except json.JSONDecodeError:
+            if self.gui:
+                self.gui.display_message("Invalid packet received", "ERROR")
+
+    def _on_ws_error(self, ws, error) -> None:
+        """Called by websocket-client on transport errors."""
+        if self.connected:
+            if self.gui:
+                self.gui.display_message(f"WebSocket error: {error}", "ERROR")
+        self.log_error("WebSocket error", error)
+
+    def _on_ws_close(self, ws, close_status_code, close_msg) -> None:
+        """Called by websocket-client when the connection is closed."""
+        was_connected = self.connected
+        self.connected = False
+        if was_connected and self.gui:
+            self.gui.display_message("Disconnected from server", "SYSTEM")
+
     def connect(self) -> None:
-        """Connect to the communication server"""
+        """Connect to the communication server.
+        
+        Routes to WebSocket (_connect_websocket) by default, which wraps the
+        connection inside an HTTP Upgrade request so that firewalls treating
+        non-HTTP TCP as suspicious will still allow the traffic.
+        
+        Falls back to raw TCP when self.use_websocket is False (legacy mode).
+        """
+        if self.use_websocket:
+            self._connect_websocket()
+            return
+
+        # ---- Legacy raw-TCP path (kept for backward compatibility) ----------
         try:
             # Validate nickname before connecting
             sanitized_nick = self.sanitize_nickname(self.nickname)
@@ -294,10 +448,9 @@ class CommunicationClient:
             
             # First, handle authentication if password is set
             if self.server_password:
-                auth_packet = json.dumps({"type": "AUTH", "password": self.server_password})
-                self.socket.send((auth_packet + "\n").encode('utf-8'))
+                self._send_packet({"type": "AUTH", "password": self.server_password})
                 
-                # Wait for authentication response
+                # Wait for authentication response (synchronous in TCP mode)
                 auth_response = self.socket.recv(4096).decode('utf-8')
                 if auth_response:
                     try:
@@ -318,23 +471,9 @@ class CommunicationClient:
             if self.gui:
                 self.gui.display_message("Connected to server", "SYSTEM")
             
-            # Send nickname to server (plaintext - server needs it for routing)
-            nick_packet = json.dumps({"type": "NICK", "nickname": self.nickname})
-            self.socket.send((nick_packet + "\n").encode('utf-8'))
+            # Send NICK and PUBKEY, then start receive loop
+            self._send_after_auth()
             
-            # Broadcast public key to all clients via server
-            public_key_pem = self.serialize_public_key().decode('utf-8')
-            key_packet = json.dumps({
-                "type": "PUBKEY",
-                "nickname": self.nickname,
-                "public_key": public_key_pem
-            })
-            self.socket.send((key_packet + "\n").encode('utf-8'))
-            
-            if self.gui:
-                self.gui.display_message("End-to-end encryption initialized", "SYSTEM")
-            
-            # Start thread to receive messages
             receive_thread = threading.Thread(target=self.receive_messages)
             receive_thread.daemon = True
             receive_thread.start()
@@ -346,7 +485,6 @@ class CommunicationClient:
                 messagebox.showerror("Connection Error", error_msg + "\n\nMake sure the server is running.")
             self.log_error(error_msg, e)
             self.connected = False
-            # Clean up socket on failure
             if self.socket:
                 try:
                     self.socket.close()
@@ -360,7 +498,6 @@ class CommunicationClient:
                 messagebox.showerror("Connection Error", error_msg)
             self.log_error(error_msg, e)
             self.connected = False
-            # Clean up socket on failure
             if self.socket:
                 try:
                     self.socket.close()
@@ -467,7 +604,7 @@ class CommunicationClient:
                     msg_packet["reply_to"] = reply_data
                 
                 # Send encrypted messages via server
-                self.socket.send((json.dumps(msg_packet) + "\n").encode('utf-8'))
+                self._send_packet(msg_packet)
                 
                 if self.gui:
                     display_msg = actual_message
@@ -528,7 +665,7 @@ class CommunicationClient:
                     msg_packet["destruct_timer"] = destruct_timer
                 
                 # Send encrypted GIF via server
-                self.socket.send((json.dumps(msg_packet) + "\n").encode('utf-8'))
+                self._send_packet(msg_packet)
                 
                 if self.gui:
                     self.gui.display_gif(gif_url, "YOU", msg_id=msg_id, destruct_timer=destruct_timer)
@@ -580,7 +717,7 @@ class CommunicationClient:
             }
             
             # Send reaction
-            self.socket.send((json.dumps(reaction_packet) + "\n").encode('utf-8'))
+            self._send_packet(reaction_packet)
             
         except Exception as e:
             if self.gui:
@@ -876,7 +1013,7 @@ class CommunicationClient:
                 "filesize": filesize,
                 "total_chunks": total_chunks
             }
-            self.socket.send((json.dumps(start_packet) + "\n").encode('utf-8'))
+            self._send_packet(start_packet)
             
             # Send file in chunks (in background thread)
             def send_chunks_async():
@@ -887,12 +1024,11 @@ class CommunicationClient:
                             # Check if cancelled
                             if self.sending_file_transfers[file_id]['cancel_flag']:
                                 # Send cancel packet
-                                cancel_packet = {
+                                self._send_packet({
                                     "type": "FILE_CANCEL",
                                     "from": self.nickname,
-                                    "file_id": file_id
-                                }
-                                self.socket.send((json.dumps(cancel_packet) + "\n").encode('utf-8'))
+                                    "file_id": file_id,
+                                })
                                 if self.gui:
                                     self.gui.display_message(f"File transfer cancelled: {filename}", "SYSTEM")
                                 return
@@ -910,14 +1046,13 @@ class CommunicationClient:
                                 encrypted_chunks[peer_nickname] = encrypted_chunk
                             
                             # Send FILE_CHUNK packet
-                            chunk_packet = {
+                            self._send_packet({
                                 "type": "FILE_CHUNK",
                                 "from": self.nickname,
                                 "file_id": file_id,
                                 "chunk_index": chunk_index,
-                                "encrypted_chunks": encrypted_chunks
-                            }
-                            self.socket.send((json.dumps(chunk_packet) + "\n").encode('utf-8'))
+                                "encrypted_chunks": encrypted_chunks,
+                            })
                             
                             chunk_index += 1
                             self.sending_file_transfers[file_id]['sent_chunks'] = chunk_index
@@ -934,12 +1069,11 @@ class CommunicationClient:
                             time.sleep(0.01)
                     
                     # Send FILE_END packet
-                    end_packet = {
+                    self._send_packet({
                         "type": "FILE_END",
                         "from": self.nickname,
-                        "file_id": file_id
-                    }
-                    self.socket.send((json.dumps(end_packet) + "\n").encode('utf-8'))
+                        "file_id": file_id,
+                    })
                     
                     if self.gui:
                         self.gui.display_message(
@@ -971,13 +1105,12 @@ class CommunicationClient:
     def send_typing_status(self, is_typing):
         """Send typing status to server"""
         try:
-            if self.connected and self.socket:
-                typing_packet = json.dumps({
+            if self.connected:
+                self._send_packet({
                     "type": "TYPING",
                     "from": self.nickname,
-                    "is_typing": is_typing
+                    "is_typing": is_typing,
                 })
-                self.socket.send((typing_packet + "\n").encode('utf-8'))
         except Exception as e:
             pass  # Silently fail for typing indicators
     
@@ -1093,10 +1226,34 @@ class CommunicationClient:
                 self._handle_file_cancel_packet(packet)
             elif packet_type == "REACTION":
                 self._handle_reaction_packet(packet)
+            elif packet_type == "AUTH_RESULT":
+                self._handle_auth_result_packet(packet)
                     
         except Exception as e:
             if self.gui:
                 self.gui.display_message(f"Error handling packet: {e}", "ERROR")
+    
+    def _handle_auth_result_packet(self, packet: Dict[str, Any]) -> None:
+        """Handle authentication result packet (WebSocket mode).
+        
+        In WebSocket mode, AUTH is sent in _on_ws_open and the server responds
+        with AUTH_RESULT before processing NICK/PUBKEY.  On success we proceed
+        with _send_after_auth(); on failure we disconnect immediately.
+        
+        In legacy TCP mode this packet is consumed synchronously inside connect()
+        before the receive loop starts, so this handler is a no-op for that path.
+        """
+        if not self.use_websocket:
+            return  # Handled synchronously in connect() for raw TCP
+        
+        if packet.get("success"):
+            self._send_after_auth()
+        else:
+            error_msg = packet.get("message", "Authentication failed")
+            if self.gui:
+                self.gui.display_message(error_msg, "ERROR")
+                messagebox.showerror("Authentication Failed", error_msg)
+            self.disconnect()
     
     def _handle_pubkey_packet(self, packet: Dict[str, Any]) -> None:
         """Handle public key exchange packet for E2E encryption setup."""
@@ -1348,13 +1505,12 @@ class CommunicationClient:
             
             if not accept:
                 # User declined - send cancel packet back
-                cancel_packet = {
-                    "type": "FILE_CANCEL",
-                    "file_id": file_id,
-                    "from": self.nickname
-                }
                 try:
-                    self.socket.send((json.dumps(cancel_packet) + "\n").encode('utf-8'))
+                    self._send_packet({
+                        "type": "FILE_CANCEL",
+                        "file_id": file_id,
+                        "from": self.nickname,
+                    })
                 except Exception as e:
                     self.log_error("Error sending file cancel packet", e)
                 
@@ -1525,6 +1681,14 @@ class CommunicationClient:
                 self.log_error(f"Error canceling auto-trust timer for {nickname}", e)
         self.pending_auto_trust.clear()
         
+        if self.ws:
+            try:
+                self.ws.close()
+            except Exception as e:
+                self.log_error("Error closing WebSocket", e)
+            finally:
+                self.ws = None
+        
         if self.socket:
             try:
                 self.socket.close()
@@ -1532,6 +1696,7 @@ class CommunicationClient:
                 self.log_error("Error closing socket", e)
             finally:
                 self.socket = None
+        
         if self.gui:
             self.gui.display_message("Disconnected from server", "SYSTEM")
 
@@ -2768,6 +2933,13 @@ if __name__ == "__main__":
     # Load configuration
     config = load_config()
     
+    use_websocket = config.get('use_websocket', True)
+    
+    def _server_display(h, p, ws):
+        """Format server address for display in dialogs."""
+        scheme = "wss" if ws else "tcp"
+        return f"{scheme}://{h}:{p}"
+    
     # Get server address (use command line args if provided, otherwise use config)
     if len(sys.argv) > 1:
         host = sys.argv[1]
@@ -2778,15 +2950,16 @@ if __name__ == "__main__":
         change_settings = messagebox.askyesno(
             "Xessenger - Login",
             f"Current settings:\n\n"
-            f"Server: {config['server_host']}:{config['server_port']}\n"
-            f"Nickname: {config['nickname']}\n\n"
+            f"Server: {_server_display(config['server_host'], config['server_port'], use_websocket)}\n"
+            f"Nickname: {config['nickname']}\n"
+            f"Transport: {'WebSocket/HTTPS (firewall-friendly)' if use_websocket else 'Raw TCP'}\n\n"
             f"Change these settings?"
         )
         
         if change_settings:
             host = simpledialog.askstring(
                 "Server Address", 
-                "Enter server address:", 
+                "Enter server hostname or IP address:", 
                 initialvalue=config['server_host']
             )
             if not host:
@@ -2794,7 +2967,7 @@ if __name__ == "__main__":
             
             port_str = simpledialog.askstring(
                 "Server Port", 
-                "Enter server port:", 
+                "Enter server port (443 for WSS, 80 for WS):", 
                 initialvalue=str(config['server_port'])
             )
             port = int(port_str) if port_str else config['server_port']
@@ -2807,8 +2980,18 @@ if __name__ == "__main__":
             if not nickname or not nickname.strip():
                 nickname = config['nickname']
             
+            ws_answer = messagebox.askyesno(
+                "Transport Protocol",
+                "Use WebSocket (WSS/HTTPS) transport?\n\n"
+                "✅ YES — WebSocket over HTTPS (port 443). Passes through most\n"
+                "    firewalls and corporate proxies. Recommended.\n\n"
+                "❌ NO  — Raw TCP (legacy mode). May be blocked by firewalls.",
+                default='yes'
+            )
+            use_websocket = ws_answer
+            
             # Save new settings
-            save_config(host, port, nickname)
+            save_config(host, port, nickname, use_websocket)
         else:
             # Use saved settings
             host = config['server_host']
@@ -2836,6 +3019,7 @@ if __name__ == "__main__":
     # Create client and GUI
     client = CommunicationClient(host=host, port=port, nickname=nickname)
     client.server_password = password  # Set password for authentication
+    client.use_websocket = use_websocket  # Apply transport mode from config
     gui = ChatGUI(client)
     
     # Connect to server in background thread

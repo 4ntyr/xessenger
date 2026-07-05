@@ -5,6 +5,7 @@ A secure, end-to-end encrypted messaging application for Windows with modern fea
 ## ✨ Features
 
 - 🔒 **End-to-End Encryption** - All messages encrypted with Diffie-Hellman key exchange + Fernet symmetric encryption
+- 🌐 **WebSocket/HTTPS Transport** - Runs over `wss://` (port 443) by default — passes through corporate firewalls and HTTP proxies
 - 🎬 **GIF Support** - Search and send GIFs via Tenor integration
 - 📎 **File Transfer** - Send files securely to other users
 - 💬 **Message Reactions** - React to messages with emojis
@@ -106,13 +107,54 @@ Settings are stored in `config.json`:
 
 ```json
 {
-    "server_host": "localhost",
-    "server_port": 5000,
-    "nickname": "YourName"
+    "server_host": "yourserver.com",
+    "server_port": 443,
+    "nickname": "YourName",
+    "use_websocket": true
 }
 ```
 
+- **`use_websocket`** — `true` (default) uses WebSocket over HTTPS (`wss://`), which passes through firewalls. Set to `false` for legacy raw-TCP mode.
+- **`server_port`** — use `443` for `wss://`, `80` for `ws://`, or any custom port your server listens on.
+
 You can edit this file manually or use the settings dialog when starting the client.
+
+## 🌐 Firewall-Friendly Transport (WebSocket/HTTPS)
+
+By default Xessenger connects over **WebSocket Secure (`wss://`)**, which piggybacks on the standard HTTPS port (443).  The connection starts as a normal HTTP/1.1 `Upgrade` request and is therefore allowed by:
+
+- Corporate firewalls that only permit HTTP/HTTPS
+- Deep-packet-inspection proxies
+- Networks that block arbitrary TCP ports
+
+### Server-side requirements
+
+The **server** must be updated to accept WebSocket connections.  Recommended Python server stack:
+
+```bash
+pip install websockets
+```
+
+```python
+import asyncio, json, websockets
+
+async def handler(websocket):
+    async for message in websocket:
+        packet = json.loads(message)
+        # ... route packet as before, reply with websocket.send(json.dumps(...))
+
+async def main():
+    async with websockets.serve(handler, "0.0.0.0", 443, ssl=ssl_context):
+        await asyncio.Future()  # run forever
+
+asyncio.run(main())
+```
+
+All existing JSON packet types (`NICK`, `PUBKEY`, `MSG`, `AUTH`, `FILE_*`, etc.) work unchanged — only the transport layer changes.
+
+### Legacy raw-TCP mode
+
+If your server still uses plain TCP, set `"use_websocket": false` in `config.json` (or answer **No** to the transport dialog at startup).  The client will fall back to the original raw-TCP / TLS path.
 
 ## 🔒 Security Features
 
