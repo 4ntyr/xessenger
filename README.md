@@ -146,11 +146,15 @@ You can edit this file manually or use the settings dialog when starting the cli
 - Run `update.bat` to install dependencies
 - Or manually: `pip install -r requirements.txt`
 
+### Configure GIPHY
+- Create a GIPHY developer key at https://developers.giphy.com/
+- Set the `GIPHY_API_KEY` environment variable before starting `client.py`
+
 ### GIFs not loading
 - Check internet connection
 - Some corporate networks block GIPHY
 - Try using a different network
-- Set a personal `GIPHY_API_KEY` environment variable if the public beta key is rate-limited
+- Verify that `GIPHY_API_KEY` is set to a valid API key
 
 ### Notifications not working
 - Ensure Windows notifications are enabled

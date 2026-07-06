@@ -81,7 +81,7 @@ def save_config(host, port, nickname):
         return False
 
 # GIPHY API configuration
-GIPHY_API_KEY = os.getenv("GIPHY_API_KEY", "dc6zaTOxFJmzC")  # Public beta key; users should get their own
+GIPHY_API_KEY = os.getenv("GIPHY_API_KEY", "").strip()
 GIPHY_API_URL = "https://api.giphy.com/v1/gifs/search"
 
 class CommunicationClient:
@@ -2544,6 +2544,9 @@ class ChatGUI:
         
         def load_results_async():
             try:
+                if not GIPHY_API_KEY:
+                    raise ValueError("Set the GIPHY_API_KEY environment variable to enable GIF search.")
+
                 # Search GIPHY API
                 params = {
                     'q': query,
