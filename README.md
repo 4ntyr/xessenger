@@ -147,7 +147,8 @@ You can edit this file manually or use the settings dialog when starting the cli
 - Or manually: `pip install -r requirements.txt`
 
 ### Configure GIPHY
-- Create a GIPHY developer key at https://developers.giphy.com/
+- Create or sign in to a GIPHY developer account at https://developers.giphy.com/
+- Create an app in the developer dashboard and copy its API key
 - Set the `GIPHY_API_KEY` environment variable before starting `client.py`
 
 ### GIFs not loading
