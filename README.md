@@ -5,7 +5,7 @@ A secure, end-to-end encrypted messaging application for Windows with modern fea
 ## ✨ Features
 
 - 🔒 **End-to-End Encryption** - All messages encrypted with Diffie-Hellman key exchange + Fernet symmetric encryption
-- 🎬 **GIF Support** - Search and send GIFs via Tenor integration
+- 🎬 **GIF Support** - Search and send GIFs via GIPHY integration
 - 📎 **File Transfer** - Send files securely to other users
 - 💬 **Message Reactions** - React to messages with emojis
 - ↩️ **Reply Threading** - Reply to specific messages
@@ -146,10 +146,16 @@ You can edit this file manually or use the settings dialog when starting the cli
 - Run `update.bat` to install dependencies
 - Or manually: `pip install -r requirements.txt`
 
+### Configure GIPHY
+- Create or sign in to a GIPHY developer account at https://developers.giphy.com/
+- Create an app in the developer dashboard and copy its API key
+- Set the `GIPHY_API_KEY` environment variable before starting `client.py`
+
 ### GIFs not loading
 - Check internet connection
-- Some corporate networks block Tenor
+- Some corporate networks block GIPHY
 - Try using a different network
+- Verify that `GIPHY_API_KEY` is set to a valid API key
 
 ### Notifications not working
 - Ensure Windows notifications are enabled
