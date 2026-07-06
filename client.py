@@ -7,7 +7,7 @@
 ║                                                              ║
 ║  Features:                                                   ║
 ║  • End-to-End Encryption (Diffie-Hellman + Fernet)         ║
-║  • GIF Support via Tenor API                                 ║
+║  • GIF Support via GIPHY API                                 ║
 ║  • File Transfer (Encrypted)                                 ║
 ║  • Message Reactions & Reply Threading                       ║
 ║  • Windows Notifications                                     ║
@@ -80,9 +80,9 @@ def save_config(host, port, nickname):
         print(f"Error saving config: {e}")
         return False
 
-# Tenor API configuration
-TENOR_API_KEY = "AIzaSyAyimkuYQYF_FXVALexPuGQctUWRURdCYQ"  # Default key, users should get their own
-TENOR_API_URL = "https://tenor.googleapis.com/v2/search"
+# GIPHY API configuration
+GIPHY_API_KEY = os.getenv("GIPHY_API_KEY", "dc6zaTOxFJmzC")  # Public beta key; users should get their own
+GIPHY_API_URL = "https://api.giphy.com/v1/gifs/search"
 
 class CommunicationClient:
     def __init__(self, host: str = 'localhost', port: int = 5000, nickname: str = 'User') -> None:
@@ -2471,7 +2471,7 @@ class ChatGUI:
     def open_gif_search(self):
         """Open a GIF search dialog"""
         search_window = Toplevel(self.window)
-        search_window.title("Search GIFs - Tenor")
+        search_window.title("Search GIFs - GIPHY")
         search_window.geometry("700x600")
         search_window.configure(bg='#2b2b2b')
         
@@ -2525,11 +2525,14 @@ class ChatGUI:
         # Initial message
         Label(results_frame, text="Enter a search term and press Enter or click Search", 
               bg='#1e1e1e', fg='#888888', font=('Arial', 11)).pack(pady=50)
+
+        Label(search_window, text="Powered by GIPHY", bg='#2b2b2b', fg='#888888',
+              font=('Arial', 9)).pack(side=tk.BOTTOM, pady=(0, 8))
         
         search_entry.focus()
     
     def search_and_display_gifs(self, query, results_frame, parent_window):
-        """Search Tenor API and display results"""
+        """Search GIPHY API and display results"""
         # Clear previous results
         for widget in results_frame.winfo_children():
             widget.destroy()
@@ -2541,19 +2544,19 @@ class ChatGUI:
         
         def load_results_async():
             try:
-                # Search Tenor API
+                # Search GIPHY API
                 params = {
                     'q': query,
-                    'key': TENOR_API_KEY,
+                    'api_key': GIPHY_API_KEY,
                     'limit': 20,
-                    'media_filter': 'gif'
+                    'rating': 'pg-13'
                 }
                 
-                response = requests.get(TENOR_API_URL, params=params, timeout=10)
+                response = requests.get(GIPHY_API_URL, params=params, timeout=10)
                 response.raise_for_status()
                 data = response.json()
                 
-                results = data.get('results', [])
+                results = data.get('data', [])
                 
                 # Update UI on main thread
                 self.window.after(0, lambda: self.display_gif_results(results, results_frame, parent_window, loading_label))
@@ -2593,23 +2596,23 @@ class ChatGUI:
             row = idx // max_cols
             col = idx % max_cols
             
-            media_formats = gif_data.get('media_formats', {})
+            images = gif_data.get('images', {})
             
             # Try different preview formats in order of preference
             preview_url = None
             gif_url = None
             
-            if 'tinygif' in media_formats:
-                preview_url = media_formats['tinygif']['url']
-            elif 'nanogif' in media_formats:
-                preview_url = media_formats['nanogif']['url']
-            elif 'gif' in media_formats:
-                preview_url = media_formats['gif']['url']
+            for image_key in ('preview_gif', 'fixed_width_small', 'fixed_width', 'original'):
+                image_data = images.get(image_key, {})
+                preview_url = image_data.get('url')
+                if preview_url:
+                    break
             
-            if 'gif' in media_formats:
-                gif_url = media_formats['gif']['url']
-            elif 'mediumgif' in media_formats:
-                gif_url = media_formats['mediumgif']['url']
+            for image_key in ('downsized', 'original', 'fixed_width'):
+                image_data = images.get(image_key, {})
+                gif_url = image_data.get('url')
+                if gif_url:
+                    break
             
             if not preview_url or not gif_url:
                 continue

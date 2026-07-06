@@ -5,7 +5,7 @@ A secure, end-to-end encrypted messaging application for Windows with modern fea
 ## ✨ Features
 
 - 🔒 **End-to-End Encryption** - All messages encrypted with Diffie-Hellman key exchange + Fernet symmetric encryption
-- 🎬 **GIF Support** - Search and send GIFs via Tenor integration
+- 🎬 **GIF Support** - Search and send GIFs via GIPHY integration
 - 📎 **File Transfer** - Send files securely to other users
 - 💬 **Message Reactions** - React to messages with emojis
 - ↩️ **Reply Threading** - Reply to specific messages
@@ -148,8 +148,9 @@ You can edit this file manually or use the settings dialog when starting the cli
 
 ### GIFs not loading
 - Check internet connection
-- Some corporate networks block Tenor
+- Some corporate networks block GIPHY
 - Try using a different network
+- Set a personal `GIPHY_API_KEY` environment variable if the public beta key is rate-limited
 
 ### Notifications not working
 - Ensure Windows notifications are enabled
