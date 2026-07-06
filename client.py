@@ -2550,7 +2550,7 @@ class ChatGUI:
                         0,
                         lambda: self.show_gif_error(
                             results_frame,
-                            "Set the GIPHY_API_KEY environment variable to enable GIF search."
+                            "Set the GIPHY_API_KEY environment variable to enable GIF search. See README.md for setup steps."
                         )
                     )
                     return
